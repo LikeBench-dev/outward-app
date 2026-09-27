@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "outward-app"
+description = "GUI launcher for Discord Web through VLESS and sing-box."
+readme = "README.md"
+license = { text = "PolyForm Noncommercial License 1.0.0" }
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = [
+  "PySide6>=6.8,<7",
+]
+
+[project.scripts]
+outward-app = "outward_app.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["outward_app*"]
+
+[tool.setuptools.dynamic]
+version = { file = ["VERSION"] }
+
