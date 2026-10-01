@@ -133,9 +133,9 @@ class RuntimeState:
     socks_port: int
     http_proxy_url: str
     socks_proxy_url: str
+    server: str = ""
+    server_port: int = 0
     protocol: str = "vless"
     protocol_label: str = "VLESS"
     started_at: str = field(default_factory=utc_now_iso)
-
-
 

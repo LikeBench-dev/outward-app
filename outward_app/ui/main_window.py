@@ -1,9 +1,11 @@
 from __future__ import annotations
 import ctypes
+import socket
 from pathlib import Path
 import re
 import subprocess
 from datetime import datetime, timezone
+from time import perf_counter
 from html import escape
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
@@ -69,6 +71,56 @@ class SwitchControl(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QRectF(9, 8, 8, 8))
 
+class LoadingButton(QPushButton):
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(text, parent)
+        self._loading = False
+        self._loading_angle = 0
+        self._idle_text = text
+        self._idle_icon = QIcon()
+        self._idle_icon_size = self.iconSize()
+        self._loading_timer = QTimer(self)
+        self._loading_timer.setInterval(80)
+        self._loading_timer.timeout.connect(self._advance_loading_icon)
+
+    def set_loading(self, loading: bool, text: str | None = None) -> None:
+        loading = bool(loading)
+        if loading:
+            if not self._loading:
+                self._idle_text = self.text()
+                self._idle_icon = self.icon()
+                self._idle_icon_size = self.iconSize()
+            self._loading = True
+            self._loading_angle = 0
+            if text is not None:
+                self.setText(text)
+            self.setIconSize(QSize(16, 16))
+            self.setEnabled(False)
+            self._advance_loading_icon()
+            self._loading_timer.start()
+            return
+
+        if not self._loading:
+            return
+        self._loading_timer.stop()
+        self._loading = False
+        self.setText(self._idle_text)
+        self.setIcon(self._idle_icon)
+        self.setIconSize(self._idle_icon_size)
+
+    def _advance_loading_icon(self) -> None:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor('#ffffff') if self.objectName() == 'primaryButton' else QColor('#C4B5FD')
+        pen = QPen(color, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawArc(QRectF(3, 3, 10, 10), self._loading_angle * 16, -270 * 16)
+        painter.end()
+        self.setIcon(QIcon(pixmap))
+        self._loading_angle = (self._loading_angle - 30) % 360
 
 class ConnectWorker(QObject):
     connected = Signal(object)
@@ -116,7 +168,7 @@ class ConnectWorker(QObject):
             self.manager.wait_for_ports([http_port, socks_port])
             http_proxy_url = f'http://127.0.0.1:{http_port}'
             socks_proxy_url = f'socks5://127.0.0.1:{socks_port}'
-            state = RuntimeState(profile_id=self.profile.id, profile_name=self.profile.name, http_port=http_port, socks_port=socks_port, http_proxy_url=http_proxy_url, socks_proxy_url=socks_proxy_url, protocol=connection.protocol, protocol_label=connection.protocol_label)
+            state = RuntimeState(profile_id=self.profile.id, profile_name=self.profile.name, http_port=http_port, socks_port=socks_port, http_proxy_url=http_proxy_url, socks_proxy_url=socks_proxy_url, server=connection.server, server_port=connection.port, protocol=connection.protocol, protocol_label=connection.protocol_label)
             self.store.mark_used(self.profile.id)
             if self.settings.auto_open_browser:
                 opened_with_proxy = open_url_with_proxy(
@@ -135,6 +187,43 @@ class ConnectWorker(QObject):
         finally:
             self.finished.emit()
 
+class PingWorker(QObject):
+    measured = Signal(int)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, host: str, port: int, timeout: float = 2.5) -> None:
+        super().__init__()
+        self.host = host
+        self.port = int(port)
+        self.timeout = timeout
+
+    def run(self) -> None:
+        started_at = perf_counter()
+        try:
+            with socket.create_connection((self.host, self.port), timeout=self.timeout):
+                elapsed_ms = max(1, round((perf_counter() - started_at) * 1000))
+                self.measured.emit(elapsed_ms)
+        except OSError as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+class DisconnectWorker(QObject):
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, manager: SingBoxManager) -> None:
+        super().__init__()
+        self.manager = manager
+
+    def run(self) -> None:
+        try:
+            self.manager.stop()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
 
 class UpdateCheckWorker(QObject):
     checked = Signal(object)
@@ -152,7 +241,6 @@ class UpdateCheckWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
-
 
 class UpdateDownloadWorker(QObject):
     progress = Signal(int, int)
@@ -187,6 +275,11 @@ class MainWindow(QMainWindow):
         self.runtime_state: RuntimeState | None = None
         self.connect_thread: QThread | None = None
         self.connect_worker: ConnectWorker | None = None
+        self.disconnect_thread: QThread | None = None
+        self.disconnect_worker: DisconnectWorker | None = None
+        self.disconnect_error: str | None = None
+        self.ping_thread: QThread | None = None
+        self.ping_worker: PingWorker | None = None
         self.update_check_thread: QThread | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_thread: QThread | None = None
@@ -211,6 +304,9 @@ class MainWindow(QMainWindow):
         self.session_timer.setInterval(1000)
         self.session_timer.timeout.connect(self._update_session_time)
         self.session_timer.start()
+        self.ping_timer = QTimer(self)
+        self.ping_timer.setInterval(10000)
+        self.ping_timer.timeout.connect(self._request_ping_update)
         self.refresh_log()
         QTimer.singleShot(1200, self._check_updates_on_startup)
         QTimer.singleShot(1700, self._connect_on_startup)
@@ -318,9 +414,9 @@ class MainWindow(QMainWindow):
 
         stats_row = QHBoxLayout()
         stats_row.setSpacing(22)
-        self.status_caption_label = QLabel('Клиент прокси находится в режиме ожидания')
+        self.status_caption_label = QLabel('')
         self.status_caption_label.setObjectName('mutedLabel')
-        stats_row.addWidget(self.status_caption_label)
+        self.status_caption_label.hide()
         self.status_profile_value = self._make_status_metric(stats_row, 'Профиль:', '-')
         self.session_value = self._make_status_metric(stats_row, 'Сессия:', '00:00:00')
         self.latency_value = self._make_status_metric(stats_row, 'Ping:', '-')
@@ -329,11 +425,11 @@ class MainWindow(QMainWindow):
 
         status_actions = QHBoxLayout()
         status_actions.setSpacing(10)
-        self.connect_button = QPushButton('Подключить')
+        self.connect_button = LoadingButton('Подключить')
         self.connect_button.setObjectName('primaryButton')
-        self.connect_button.setFixedWidth(132)
-        self.disconnect_button = QPushButton('Отключить')
-        self.disconnect_button.setFixedWidth(120)
+        self.connect_button.setFixedWidth(156)
+        self.disconnect_button = LoadingButton('Отключить')
+        self.disconnect_button.setFixedWidth(150)
         self.disconnect_button.setObjectName('ghostButton')
         self.connect_button.clicked.connect(self.connect_profile)
         self.disconnect_button.clicked.connect(self.disconnect_profile)
@@ -1007,11 +1103,12 @@ class MainWindow(QMainWindow):
     def _sync_profile_buttons(self) -> None:
         has_profile = self.current_profile() is not None
         running = self.manager.is_running()
-        busy = self.connect_thread is not None
+        busy = self.connect_thread is not None or self.disconnect_thread is not None
         self._refresh_profile_item_selection()
-        self.edit_button.setEnabled(has_profile)
-        self.delete_button.setEnabled(has_profile)
+        self.edit_button.setEnabled(has_profile and not busy)
+        self.delete_button.setEnabled(has_profile and not busy)
         self.connect_button.setEnabled(has_profile and (not running) and (not busy))
+        self.disconnect_button.setEnabled(running and not busy)
 
     def current_profile(self) -> ConnectionProfile | None:
         item = self.profile_list.currentItem()
@@ -1062,6 +1159,8 @@ class MainWindow(QMainWindow):
             self._load_profiles()
 
     def connect_profile(self) -> None:
+        if self.connect_thread is not None or self.disconnect_thread is not None:
+            return
         profile = self.current_profile()
         if not profile:
             QMessageBox.information(self, APP_NAME, 'Сначала выберите профиль.')
@@ -1069,7 +1168,7 @@ class MainWindow(QMainWindow):
         self.save_settings()
         self.connect_button.setVisible(True)
         self.disconnect_button.setVisible(False)
-        self.connect_button.setEnabled(False)
+        self.connect_button.set_loading(True, 'Подключение...')
         self.disconnect_button.setEnabled(False)
         self.status_caption_label.setText('Запуск подключения...')
         self.status_title_label.setText('Подключение запускается')
@@ -1099,8 +1198,8 @@ class MainWindow(QMainWindow):
             self.http_port_label.setText(str(state.http_port))
             self.socks_port_label.setText(str(state.socks_port))
             self.protocol_label.setText(state.protocol_label)
-            self.latency_value.setText('активно')
-            self.status_caption_label.setText('Локальный proxy-сервер готов к работе')
+            self.latency_value.setText('...')
+            self._start_ping_updates()
             self.setWindowTitle(f'{APP_NAME} - Подключено к {state.profile_name}')
         self._set_tab_index(0)
         self._load_profiles()
@@ -1112,6 +1211,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.manager.stop()
+        self._stop_ping_updates()
         self.runtime_state = None
         self._set_connected(False)
         self.status_caption_label.setText('Ошибка подключения')
@@ -1119,6 +1219,7 @@ class MainWindow(QMainWindow):
         self.refresh_log()
 
     def _on_connect_finished(self) -> None:
+        self.connect_button.set_loading(False)
         self.connect_thread = None
         self.connect_worker = None
         self._sync_profile_buttons()
@@ -1128,11 +1229,60 @@ class MainWindow(QMainWindow):
         self.connect_button.setVisible(not running)
 
     def disconnect_profile(self) -> None:
-        self.manager.stop()
-        self.runtime_state = None
-        self._set_connected(False)
-        self.status_caption_label.setText('Подключение остановлено.')
+        if self.connect_thread is not None or self.disconnect_thread is not None:
+            return
+        if not self.manager.is_running():
+            self._stop_ping_updates()
+            self.runtime_state = None
+            self._set_connected(False)
+            self.status_caption_label.setText('Подключение остановлено.')
+            self.refresh_log()
+            return
+        self.disconnect_error = None
+        self.disconnect_button.setVisible(True)
+        self.disconnect_button.set_loading(True, 'Отключение...')
+        self.connect_button.setEnabled(False)
+        self.open_browser_button.setEnabled(False)
+        self.status_caption_label.setText('Останавливаем подключение...')
+        self.status_title_label.setText('Отключение proxy')
+        self.status_dot.setProperty('connected', 'pending')
+        self._refresh_status_dot()
+        self.disconnect_thread = QThread(self)
+        self.disconnect_worker = DisconnectWorker(self.manager)
+        self.disconnect_worker.moveToThread(self.disconnect_thread)
+        self.disconnect_thread.started.connect(self.disconnect_worker.run)
+        self.disconnect_worker.failed.connect(self._on_disconnect_failed)
+        self.disconnect_worker.finished.connect(self.disconnect_thread.quit)
+        self.disconnect_worker.finished.connect(self.disconnect_worker.deleteLater)
+        self.disconnect_thread.finished.connect(self._on_disconnect_finished)
+        self.disconnect_thread.finished.connect(self.disconnect_thread.deleteLater)
+        self.disconnect_thread.start()
+
+    def _on_disconnect_failed(self, message: str) -> None:
+        self.disconnect_error = message
+        try:
+            append_log_entry(message)
+        except Exception:
+            pass
+
+    def _on_disconnect_finished(self) -> None:
+        error = self.disconnect_error
+        self.disconnect_button.set_loading(False)
+        self.disconnect_thread = None
+        self.disconnect_worker = None
+        self.disconnect_error = None
+        still_running = self.manager.is_running()
+        if error and still_running:
+            self._set_connected(True)
+            self.status_caption_label.setText('Не удалось остановить подключение')
+            QMessageBox.warning(self, APP_NAME, f'Не удалось остановить подключение.\n\n{error}')
+        else:
+            self._stop_ping_updates()
+            self.runtime_state = None
+            self._set_connected(False)
+            self.status_caption_label.setText('Подключение остановлено.')
         self.refresh_log()
+        self._sync_profile_buttons()
 
     def open_browser(self) -> None:
         if not self.runtime_state:
@@ -1146,16 +1296,16 @@ class MainWindow(QMainWindow):
             self.settings.disable_browser_extensions,
         )
 
-
     def _set_connected(self, connected: bool) -> None:
         self.status_dot.setProperty('connected', 'true' if connected else 'false')
         self._refresh_status_dot()
         self.status_title_label.setText('Подключено к proxy' if connected else 'Подключение остановлено')
         self.connect_button.setVisible(not connected)
         self.disconnect_button.setVisible(connected)
-        self.disconnect_button.setEnabled(connected)
-        self.open_browser_button.setEnabled(connected)
-        self.connect_button.setEnabled(not connected and self.current_profile() is not None)
+        busy = self.connect_thread is not None or self.disconnect_thread is not None
+        self.disconnect_button.setEnabled(connected and not busy)
+        self.open_browser_button.setEnabled(connected and not busy)
+        self.connect_button.setEnabled((not connected) and self.current_profile() is not None and not busy)
         if not connected:
             self.setWindowTitle(f'{APP_NAME} - Настройки')
             self.status_profile_value.setText('-')
@@ -1185,6 +1335,45 @@ class MainWindow(QMainWindow):
             self.session_value.setText(f'{hours:02}:{minutes:02}:{seconds:02}')
         except ValueError:
             self.session_value.setText('00:00:00')
+
+    def _start_ping_updates(self) -> None:
+        self.ping_timer.start()
+        self._request_ping_update()
+
+    def _stop_ping_updates(self) -> None:
+        self.ping_timer.stop()
+        self.latency_value.setText('-')
+
+    def _request_ping_update(self) -> None:
+        state = self.runtime_state
+        if state is None or not self.manager.is_running():
+            self._stop_ping_updates()
+            return
+        if self.ping_thread is not None or not state.server or state.server_port <= 0:
+            return
+        self.ping_thread = QThread(self)
+        self.ping_worker = PingWorker(state.server, state.server_port)
+        self.ping_worker.moveToThread(self.ping_thread)
+        self.ping_thread.started.connect(self.ping_worker.run)
+        self.ping_worker.measured.connect(self._on_ping_measured)
+        self.ping_worker.failed.connect(self._on_ping_failed)
+        self.ping_worker.finished.connect(self.ping_thread.quit)
+        self.ping_worker.finished.connect(self.ping_worker.deleteLater)
+        self.ping_thread.finished.connect(self._on_ping_finished)
+        self.ping_thread.finished.connect(self.ping_thread.deleteLater)
+        self.ping_thread.start()
+
+    def _on_ping_measured(self, elapsed_ms: int) -> None:
+        if self.runtime_state is not None and self.manager.is_running():
+            self.latency_value.setText(f'{elapsed_ms} мс')
+
+    def _on_ping_failed(self, message: str) -> None:
+        if self.runtime_state is not None and self.manager.is_running():
+            self.latency_value.setText('нет ответа')
+
+    def _on_ping_finished(self) -> None:
+        self.ping_thread = None
+        self.ping_worker = None
 
     def refresh_log(self) -> None:
         text = tail_log()
