@@ -1109,6 +1109,7 @@ class MainWindow(QMainWindow):
         self.delete_button.setEnabled(has_profile and not busy)
         self.connect_button.setEnabled(has_profile and (not running) and (not busy))
         self.disconnect_button.setEnabled(running and not busy)
+        self.open_browser_button.setEnabled(bool(self.runtime_state) and running and not busy)
 
     def current_profile(self) -> ConnectionProfile | None:
         item = self.profile_list.currentItem()

@@ -21,6 +21,15 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+def exclude_bundled_binaries(toc, names):
+    excluded = {name.lower() for name in names}
+    return [entry for entry in toc if os.path.basename(entry[0]).lower() not in excluded]
+
+
+# QtCore should load the Windows ICU DLLs. The Codex/Poppler ICU DLLs can be
+# picked up by PyInstaller and have suffixed exports, which breaks PySide6.
+a.binaries = exclude_bundled_binaries(a.binaries, {"icudt78.dll", "icuuc.dll"})
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -45,4 +54,3 @@ exe = EXE(
     icon=['assets/outward.ico'],
     version=os.environ.get('APP_VERSION_INFO'),
 )
-
