@@ -1238,10 +1238,16 @@ class MainWindow(QMainWindow):
         message = (rest[:level_match.start()] + rest[level_match.end():]).strip(' :-')
         return time_value, level, message or rest
 
-    def _restore_from_tray(self) -> None:
-        self.showNormal()
+    def restore_from_tray(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
         self.raise_()
         self.activateWindow()
+
+    def _restore_from_tray(self) -> None:
+        self.restore_from_tray()
 
     def _quit_from_tray(self) -> None:
         self.force_quit = True
@@ -1288,19 +1294,3 @@ class MainWindow(QMainWindow):
         if self.tray_icon:
             self.tray_icon.hide()
         event.accept()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
