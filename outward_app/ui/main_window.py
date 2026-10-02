@@ -1,6 +1,5 @@
 from __future__ import annotations
 import ctypes
-import socket
 from pathlib import Path
 import re
 import subprocess
@@ -9,6 +8,7 @@ from time import perf_counter
 from html import escape
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtNetwork import QTcpSocket
 from PySide6.QtWidgets import QApplication, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QTextEdit, QScrollArea, QSpinBox, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget
 from outward_app.app_info import APP_NAME
 from outward_app.core.autostart import set_launch_on_startup
@@ -187,27 +187,6 @@ class ConnectWorker(QObject):
         finally:
             self.finished.emit()
 
-class PingWorker(QObject):
-    measured = Signal(int)
-    failed = Signal(str)
-    finished = Signal()
-
-    def __init__(self, host: str, port: int, timeout: float = 2.5) -> None:
-        super().__init__()
-        self.host = host
-        self.port = int(port)
-        self.timeout = timeout
-
-    def run(self) -> None:
-        started_at = perf_counter()
-        try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout):
-                elapsed_ms = max(1, round((perf_counter() - started_at) * 1000))
-                self.measured.emit(elapsed_ms)
-        except OSError as exc:
-            self.failed.emit(str(exc))
-        finally:
-            self.finished.emit()
 
 class DisconnectWorker(QObject):
     failed = Signal(str)
@@ -278,8 +257,8 @@ class MainWindow(QMainWindow):
         self.disconnect_thread: QThread | None = None
         self.disconnect_worker: DisconnectWorker | None = None
         self.disconnect_error: str | None = None
-        self.ping_thread: QThread | None = None
-        self.ping_worker: PingWorker | None = None
+        self.ping_socket: QTcpSocket | None = None
+        self.ping_started_at = 0.0
         self.update_check_thread: QThread | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_thread: QThread | None = None
@@ -307,6 +286,10 @@ class MainWindow(QMainWindow):
         self.ping_timer = QTimer(self)
         self.ping_timer.setInterval(10000)
         self.ping_timer.timeout.connect(self._request_ping_update)
+        self.ping_timeout_timer = QTimer(self)
+        self.ping_timeout_timer.setSingleShot(True)
+        self.ping_timeout_timer.setInterval(2500)
+        self.ping_timeout_timer.timeout.connect(self._on_ping_timeout)
         self.refresh_log()
         QTimer.singleShot(1200, self._check_updates_on_startup)
         QTimer.singleShot(1700, self._connect_on_startup)
@@ -1343,6 +1326,7 @@ class MainWindow(QMainWindow):
 
     def _stop_ping_updates(self) -> None:
         self.ping_timer.stop()
+        self._finish_ping_probe()
         self.latency_value.setText('-')
 
     def _request_ping_update(self) -> None:
@@ -1350,31 +1334,45 @@ class MainWindow(QMainWindow):
         if state is None or not self.manager.is_running():
             self._stop_ping_updates()
             return
-        if self.ping_thread is not None or not state.server or state.server_port <= 0:
+        if self.ping_socket is not None or not state.server or state.server_port <= 0:
             return
-        self.ping_thread = QThread(self)
-        self.ping_worker = PingWorker(state.server, state.server_port)
-        self.ping_worker.moveToThread(self.ping_thread)
-        self.ping_thread.started.connect(self.ping_worker.run)
-        self.ping_worker.measured.connect(self._on_ping_measured)
-        self.ping_worker.failed.connect(self._on_ping_failed)
-        self.ping_worker.finished.connect(self.ping_thread.quit)
-        self.ping_worker.finished.connect(self.ping_worker.deleteLater)
-        self.ping_thread.finished.connect(self._on_ping_finished)
-        self.ping_thread.finished.connect(self.ping_thread.deleteLater)
-        self.ping_thread.start()
+        self.ping_socket = QTcpSocket(self)
+        self.ping_started_at = perf_counter()
+        self.ping_socket.connected.connect(self._on_ping_connected)
+        self.ping_socket.errorOccurred.connect(self._on_ping_failed)
+        self.ping_socket.connectToHost(state.server, state.server_port)
+        self.ping_timeout_timer.start()
 
-    def _on_ping_measured(self, elapsed_ms: int) -> None:
+    def _on_ping_connected(self) -> None:
+        if self.ping_socket is None:
+            return
+        elapsed_ms = max(1, round((perf_counter() - self.ping_started_at) * 1000))
         if self.runtime_state is not None and self.manager.is_running():
             self.latency_value.setText(f'{elapsed_ms} мс')
+        self._finish_ping_probe()
 
-    def _on_ping_failed(self, message: str) -> None:
+    def _on_ping_failed(self, *args) -> None:
+        if self.ping_socket is None:
+            return
         if self.runtime_state is not None and self.manager.is_running():
             self.latency_value.setText('нет ответа')
+        self._finish_ping_probe()
 
-    def _on_ping_finished(self) -> None:
-        self.ping_thread = None
-        self.ping_worker = None
+    def _on_ping_timeout(self) -> None:
+        if self.ping_socket is None:
+            return
+        if self.runtime_state is not None and self.manager.is_running():
+            self.latency_value.setText('нет ответа')
+        self._finish_ping_probe()
+
+    def _finish_ping_probe(self) -> None:
+        socket = self.ping_socket
+        self.ping_socket = None
+        self.ping_timeout_timer.stop()
+        if socket is None:
+            return
+        socket.abort()
+        socket.deleteLater()
 
     def refresh_log(self) -> None:
         text = tail_log()

@@ -16,7 +16,9 @@ from outward_app.core.models import AppSettings, ConnectionProfile, DEFAULT_HTTP
 from outward_app.core.singbox import (
     SingBoxManager,
     build_sing_box_config,
+    find_sing_box,
     is_port_open,
+    managed_sing_box_path,
     rotate_logs_on_app_start,
     sing_box_process_uses_outward_config,
     sing_box_session_matches_process,
@@ -243,6 +245,56 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(errors, [])
             stop_pids.assert_called_once_with(['4321'])
             write_sessions.assert_called_once_with([])
+
+    def test_find_sing_box_installs_bundled_copy_to_app_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app_data = tmp_path / "app-data"
+            bundled = tmp_path / "bundle"
+            app_root = tmp_path / "app"
+            bundled.mkdir()
+            app_root.mkdir()
+            source = bundled / "sing-box.exe"
+            source.write_bytes(b"bundled sing-box")
+
+            with (
+                patch("outward_app.core.singbox.app_data_dir", return_value=app_data),
+                patch("outward_app.core.singbox.bundled_dir", return_value=bundled),
+                patch("outward_app.core.singbox.app_dir", return_value=app_root),
+            ):
+                found = find_sing_box()
+                expected = managed_sing_box_path()
+
+            self.assertEqual(Path(found), expected)
+            self.assertEqual(expected.read_bytes(), b"bundled sing-box")
+            self.assertNotEqual(Path(found).parent, bundled)
+
+    def test_find_sing_box_uses_existing_managed_copy_if_update_is_locked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app_data = tmp_path / "app-data"
+            bundled = tmp_path / "bundle"
+            app_root = tmp_path / "app"
+            bundled.mkdir()
+            app_root.mkdir()
+            source = bundled / "sing-box.exe"
+            source.write_bytes(b"new sing-box")
+            target = app_data / "bin" / "sing-box.exe"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"old sing-box")
+
+            with (
+                patch("outward_app.core.singbox.app_data_dir", return_value=app_data),
+                patch("outward_app.core.singbox.bundled_dir", return_value=bundled),
+                patch("outward_app.core.singbox.app_dir", return_value=app_root),
+                patch("outward_app.core.singbox.os.replace", side_effect=PermissionError("locked")),
+                patch("outward_app.core.singbox.append_log_entry") as append_log,
+            ):
+                found = find_sing_box()
+
+            self.assertEqual(Path(found), target)
+            self.assertEqual(target.read_bytes(), b"old sing-box")
+            append_log.assert_called_once()
 
     def test_manager_stop_waits_for_tracked_ports_to_close(self):
         class DummyProcess:

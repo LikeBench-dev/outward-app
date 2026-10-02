@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import filecmp
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -232,14 +234,53 @@ def rotate_logs_on_app_start() -> None:
         except OSError:
             pass
 
+
+def managed_sing_box_path() -> Path:
+    return app_data_dir() / "bin" / "sing-box.exe"
+
+
+def _install_managed_sing_box(source: Path) -> Path:
+    target = managed_sing_box_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists() and filecmp.cmp(source, target, shallow=False):
+        return target
+
+    temp_target = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(source, temp_target)
+        os.replace(temp_target, target)
+    except OSError as exc:
+        try:
+            if temp_target.exists():
+                temp_target.unlink()
+        except OSError:
+            pass
+        if target.exists():
+            append_log_entry(f"Could not update managed sing-box.exe: {exc}", "WARNING")
+            return target
+        raise RuntimeError(f"Could not install sing-box.exe to {target}: {exc}") from exc
+
+    return target
+
+
 def find_sing_box() -> str:
-    candidates = [
+    bundled_candidates = [
         bundled_dir() / "sing-box.exe",
         bundled_dir() / "bin" / "sing-box.exe",
+    ]
+    for candidate in bundled_candidates:
+        if candidate.exists():
+            return str(_install_managed_sing_box(candidate))
+
+    managed = managed_sing_box_path()
+    if managed.exists():
+        return str(managed)
+
+    candidates = [
         app_dir() / "sing-box.exe",
         app_dir() / "bin" / "sing-box.exe",
     ]
-
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
@@ -249,7 +290,6 @@ def find_sing_box() -> str:
         return from_path
 
     raise FileNotFoundError("sing-box.exe was not found. Put it in the app folder or add sing-box to PATH.")
-
 
 def _normalize_process_text(value: object) -> str:
     return str(value or "").replace("/", "\\").lower()
