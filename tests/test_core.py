@@ -137,6 +137,17 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("wg-psk", sanitized)
         self.assertIn("***", sanitized)
 
+    def test_sanitize_connection_error_masks_embedded_profile_urls(self):
+        for url in (
+            'ss://aes-256-gcm:private-password@example.net:8388',
+            'vless://private-uuid@example.net:443?pbk=private-public-key',
+            'vless\\://private-uuid@example.net:443',
+        ):
+            with self.subTest(scheme=url.split(':', 1)[0]):
+                result = sanitize_connection_error(f'Invalid profile "{url}"; retry')
+                self.assertNotIn('private-', result)
+                self.assertIn('retry', result)
+
     def test_settings_loads_legacy_keys(self):
         settings = AppSettings.from_dict({"default_port": 10808, "auto_open_discord": False})
         self.assertEqual(settings.http_port, 10808)

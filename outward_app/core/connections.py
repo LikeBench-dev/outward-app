@@ -226,7 +226,7 @@ def protocol_label_for_link(raw: str) -> str:
 
 
 def sanitize_connection_error(message: str) -> str:
-    sanitized = message
+    sanitized = re.sub(r'(?:ss|vless)(?:\\)?://[^\s\'"<>]+', '[профиль скрыт]', message, flags=re.IGNORECASE)
     secret_patterns = (
         r'("password"\s*:\s*")[^"]+(")',
         r'("private_key"\s*:\s*")[^"]+(")',

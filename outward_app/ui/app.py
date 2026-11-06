@@ -12,6 +12,7 @@ from outward_app.core.singbox import rotate_logs_on_app_start
 from outward_app.paths import asset_path
 from outward_app.ui.main_window import MainWindow
 from outward_app.ui.styles import APP_STYLE
+from outward_app.ui.widgets import install_pointer_cursors
 
 
 SINGLE_INSTANCE_SERVER_NAME = "outward-app-single-instance"
@@ -73,6 +74,7 @@ def apply_fluent_theme() -> None:
 
 def run() -> int:
     app = QApplication(sys.argv)
+    install_pointer_cursors(app)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     if notify_existing_instance():

@@ -22,3 +22,7 @@ C:\Home Projects\outward-app\.codex\skills\outward-release-notes\SKILL.md
 ```
 
 When a task changes major app behavior, architecture, runtime file locations, connect/disconnect flow, packaging, or testing conventions, update `outward-app-overview` as part of the same work.
+
+## Frontend and design work
+
+For UI development, design review or visual refinement, load `.codex/skills/impeccable/SKILL.md` and its `reference/outward-qt.md` project integration before editing. Use root `PRODUCT.md` and `DESIGN.md` to preserve the current PySide6 interface. The local Qt path uses direct context and relevant design playbooks; browser Live Mode and web detector hooks do not validate this application.

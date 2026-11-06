@@ -6,10 +6,10 @@ import subprocess
 from datetime import datetime, timezone
 from time import perf_counter
 from html import escape
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QTcpSocket
-from PySide6.QtWidgets import QApplication, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QTextEdit, QScrollArea, QSpinBox, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QTextEdit, QScrollArea, QSizePolicy, QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget
 from outward_app.app_info import APP_NAME
 from outward_app.core.autostart import set_launch_on_startup
 from outward_app.core.browser import open_url_with_proxy
@@ -21,6 +21,7 @@ from outward_app.core.storage import JsonStore
 from outward_app.core.updater import UpdateCheckResult, UpdateManager, UpdateRelease
 from outward_app.paths import asset_path
 from outward_app.ui.dialogs import LaunchSitesDialog, ProfileDialog
+from outward_app.ui.widgets import CurrentPageStack, ElidedLabel, StatusCaption
 from outward_app.version import get_app_version
 
 try:
@@ -28,36 +29,23 @@ try:
 except ImportError:
     FluentComboBox = None
 
-class SwitchControl(QWidget):
-    toggled = Signal(bool)
-
+class SwitchControl(QCheckBox):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._checked = False
         self.setFixedSize(44, 24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def isChecked(self) -> bool:
-        return self._checked
-
-    def setChecked(self, checked: bool) -> None:
-        checked = bool(checked)
-        if self._checked == checked:
-            return
-        self._checked = checked
-        self.update()
-        self.toggled.emit(checked)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
-            self.setChecked(not self._checked)
-        super().mouseReleaseEvent(event)
+    def hitButton(self, position) -> bool:
+        return self.rect().contains(position)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            painter.setOpacity(0.45)
         track = QRectF(2, 2, 40, 20)
-        if self._checked:
+        if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor('#9B59FF'))
             painter.drawRoundedRect(track, 10, 10)
@@ -70,6 +58,10 @@ class SwitchControl(QWidget):
             painter.setPen(QPen(QColor('#94A3B8'), 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QRectF(9, 8, 8, 8))
+        if self.hasFocus():
+            painter.setPen(QPen(QColor('#b98cff'), 1, Qt.PenStyle.DotLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(0.5, 0.5, 43, 23), 5, 5)
 
 class LoadingButton(QPushButton):
     def __init__(self, text: str, parent=None) -> None:
@@ -334,7 +326,27 @@ class MainWindow(QMainWindow):
         profile_title.setObjectName('sectionTitle')
         side_layout.addWidget(profile_title)
 
+        self.empty_profiles = QFrame()
+        self.empty_profiles.setObjectName('emptyProfiles')
+        empty_layout = QVBoxLayout(self.empty_profiles)
+        empty_layout.setContentsMargins(4, 12, 4, 0)
+        empty_title = QLabel('Пока нет профилей')
+        empty_title.setObjectName('settingLabel')
+        empty_title.setWordWrap(True)
+        empty_hint = QLabel('Добавьте ссылку подключения, чтобы начать.')
+        empty_hint.setObjectName('mutedLabel')
+        empty_hint.setWordWrap(True)
+        empty_add = QPushButton('Добавить профиль')
+        empty_add.setObjectName('primaryButton')
+        empty_add.clicked.connect(self.add_profile)
+        empty_layout.addWidget(empty_title)
+        empty_layout.addWidget(empty_hint)
+        empty_layout.addWidget(empty_add)
+        empty_layout.addStretch(1)
+        side_layout.addWidget(self.empty_profiles, 1)
+
         self.profile_list = QListWidget()
+        self.profile_list.setAccessibleName('Профили подключения')
         self.profile_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.profile_list.customContextMenuRequested.connect(self._show_profile_context_menu)
         self.profile_list.currentItemChanged.connect(self._sync_profile_buttons)
@@ -355,6 +367,7 @@ class MainWindow(QMainWindow):
         root.addWidget(sidebar)
 
         scroll = QScrollArea()
+        self.content_scroll = scroll
         scroll.setObjectName('contentScroll')
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -372,6 +385,7 @@ class MainWindow(QMainWindow):
         status_panel = QFrame()
         status_panel.setObjectName('statusPanel')
         status_layout = QGridLayout(status_panel)
+        self.status_layout = status_layout
         status_layout.setContentsMargins(16, 14, 16, 14)
         status_layout.setHorizontalSpacing(14)
         status_layout.setVerticalSpacing(4)
@@ -390,23 +404,29 @@ class MainWindow(QMainWindow):
         self.status_dot.setObjectName('statusDot')
         self.status_title_label = QLabel('Подключение остановлено')
         self.status_title_label.setObjectName('statusTitle')
+        self.status_title_label.setWordWrap(True)
         status_title_row.addWidget(self.status_dot)
-        status_title_row.addWidget(self.status_title_label)
-        status_title_row.addStretch(1)
+        status_title_row.addWidget(self.status_title_label, 1)
         status_layout.addLayout(status_title_row, 0, 1)
 
         stats_row = QHBoxLayout()
         stats_row.setSpacing(22)
-        self.status_caption_label = QLabel('')
+        self.status_caption_label = StatusCaption('')
         self.status_caption_label.setObjectName('mutedLabel')
+        self.status_caption_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.status_caption_label.setWordWrap(True)
         self.status_caption_label.hide()
+        status_layout.addWidget(self.status_caption_label, 2, 1, 1, 2)
         self.status_profile_value = self._make_status_metric(stats_row, 'Профиль:', '-')
         self.session_value = self._make_status_metric(stats_row, 'Сессия:', '00:00:00')
         self.latency_value = self._make_status_metric(stats_row, 'Ping:', '-')
         stats_row.addStretch(1)
         status_layout.addLayout(stats_row, 1, 1)
 
-        status_actions = QHBoxLayout()
+        self.status_actions = QFrame()
+        self.status_actions.setObjectName('statusActions')
+        status_actions = QHBoxLayout(self.status_actions)
+        status_actions.setContentsMargins(0, 0, 0, 0)
         status_actions.setSpacing(10)
         self.connect_button = LoadingButton('Подключить')
         self.connect_button.setObjectName('primaryButton')
@@ -418,7 +438,7 @@ class MainWindow(QMainWindow):
         self.disconnect_button.clicked.connect(self.disconnect_profile)
         status_actions.addWidget(self.connect_button)
         status_actions.addWidget(self.disconnect_button)
-        status_layout.addLayout(status_actions, 0, 2, 2, 1)
+        status_layout.addWidget(self.status_actions, 0, 2, 2, 1)
         status_layout.setColumnStretch(1, 1)
         body_layout.addWidget(status_panel)
 
@@ -454,21 +474,27 @@ class MainWindow(QMainWindow):
         self.launch_favicon.setFixedSize(18, 18)
         self.launch_url_combo = self._make_combo_box()
         self.launch_url_combo.setObjectName('launchCombo')
+        self.launch_url_combo.setMinimumWidth(0)
+        self.launch_url_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         set_launch_editable = getattr(self.launch_url_combo, 'setEditable', None)
         if set_launch_editable is not None:
             set_launch_editable(False)
         self.launch_url_combo.currentTextChanged.connect(self._remember_launch_url)
         launch_hint = QLabel('Открыть после запуска')
+        self.launch_hint = launch_hint
         launch_hint.setObjectName('launchHint')
         launch_target_layout.addWidget(self.launch_favicon)
         launch_target_layout.addWidget(self.launch_url_combo, 1)
         launch_target_layout.addWidget(launch_hint)
         self.launch_auto_open_check = self._make_switch()
+        self.launch_auto_open_check.setAccessibleName('Запускать браузер после подключения')
         self.launch_auto_open_check.hide()
         self._connect_switch(self.launch_auto_open_check, self._remember_auto_open_from_launch)
         self.launch_sites_button = QPushButton('+')
         self.launch_sites_button.setObjectName('launchManageButton')
         self.launch_sites_button.setFixedSize(34, 34)
+        self.launch_sites_button.setToolTip('Управление ресурсами запуска')
+        self.launch_sites_button.setAccessibleName('Управление ресурсами запуска')
         self.launch_sites_button.clicked.connect(self.manage_launch_sites)
         launch_row.addWidget(self.open_browser_button, 0)
         launch_row.addWidget(launch_target, 1)
@@ -498,7 +524,7 @@ class MainWindow(QMainWindow):
         pivot_layout.addStretch(1)
         body_layout.addWidget(pivot)
 
-        self.tabs = QStackedWidget()
+        self.tabs = CurrentPageStack()
         self.tabs.setObjectName('contentStack')
         self.log_tab_page = QWidget()
         self.log_tab_page.setObjectName('logsTabPage')
@@ -509,9 +535,9 @@ class MainWindow(QMainWindow):
         self.log_view = QTextEdit()
         self.log_view.setObjectName('logConsole')
         self.log_view.setReadOnly(True)
-        self.log_view.setFixedHeight(392)
+        self.log_view.setMinimumHeight(240)
         self.log_view.setPlaceholderText('Лог sing-box появится здесь после запуска.')
-        log_tab_layout.addWidget(self.log_view)
+        log_tab_layout.addWidget(self.log_view, 1)
         self.tabs.addWidget(self.log_tab_page)
         self.tabs.addWidget(self._build_settings_tab())
         self.tabs.addWidget(self._build_update_tab())
@@ -521,6 +547,31 @@ class MainWindow(QMainWindow):
         self.footer_label.setObjectName('footerLabel')
         body_layout.addWidget(self.footer_label)
         self._set_tab_index(1)
+        self._compact_layout = None
+        scroll.viewport().installEventFilter(self)
+        self._update_responsive_layout(scroll.viewport().width())
+
+    def eventFilter(self, watched, event) -> bool:
+        if (hasattr(self, '_compact_layout') and watched is self.content_scroll.viewport()
+                and event.type() == QEvent.Type.Resize):
+            self._update_responsive_layout(event.size().width())
+        return super().eventFilter(watched, event)
+
+    def _update_responsive_layout(self, viewport_width: int) -> None:
+        compact = viewport_width - 50 < 760
+        if self._compact_layout == compact:
+            return
+        self._compact_layout = compact
+        self.settings_cards.setDirection(QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight)
+        for index in range(2):
+            self.settings_cards.setStretch(index, 0 if compact else 1)
+        if compact:
+            self.status_layout.addWidget(self.status_actions, 3, 1, 1, 2, Qt.AlignmentFlag.AlignRight)
+        else:
+            self.status_layout.addWidget(self.status_actions, 0, 2, 2, 1)
+        self.launch_hint.setVisible(not compact)
+        self.tabs.updateGeometry()
+
     def _make_switch(self) -> QWidget:
         return SwitchControl()
 
@@ -608,8 +659,11 @@ class MainWindow(QMainWindow):
         box.setSpacing(4)
         title_label = QLabel(title)
         title_label.setObjectName('metricTitle')
-        value_label = QLabel(value)
+        value_label = ElidedLabel(value) if title == 'Профиль:' else QLabel(value)
         value_label.setObjectName('statusMetricValue')
+        if title == 'Профиль:':
+            value_label.setMinimumWidth(90)
+            value_label.setMaximumWidth(140)
         box.addWidget(title_label)
         box.addWidget(value_label)
         layout.addLayout(box)
@@ -622,6 +676,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(4)
         title_label = QLabel(title)
         title_label.setObjectName('metricTitle')
+        title_label.setWordWrap(True)
         value_label = QLabel(value)
         value_label.setObjectName('metricValue')
         layout.addWidget(title_label)
@@ -636,19 +691,23 @@ class MainWindow(QMainWindow):
         layout.setSpacing(18)
 
         cards = QHBoxLayout()
+        self.settings_cards = cards
         cards.setSpacing(16)
 
         general = QFrame()
+        self.general_settings_card = general
         general.setObjectName('settingsCard')
         general_layout = QGridLayout(general)
         general_layout.setContentsMargins(16, 16, 16, 16)
         general_layout.setHorizontalSpacing(18)
         general_layout.setVerticalSpacing(12)
+        general_layout.setColumnStretch(0, 1)
         heading = QLabel('Общие настройки')
         heading.setObjectName('settingsHeading')
         general_layout.addWidget(heading, 0, 0, 1, 2)
 
         self.browser_combo = self._make_combo_box()
+        self.browser_combo.setFixedWidth(110)
         self.browser_combo.addItem('Авто', 'auto')
         self.browser_combo.addItem('Chrome', 'chrome')
         self.browser_combo.addItem('Edge', 'edge')
@@ -660,6 +719,7 @@ class MainWindow(QMainWindow):
         self.stop_existing_check = self._make_switch()
         self.minimize_to_tray_check = self._make_switch()
         self.language_combo = self._make_combo_box()
+        self.language_combo.setFixedWidth(110)
         self.language_combo.addItem('Русский', 'ru')
         self.language_combo.addItem('English', 'en')
 
@@ -672,19 +732,26 @@ class MainWindow(QMainWindow):
         cards.addWidget(general, 1)
 
         proxy = QFrame()
+        self.proxy_settings_card = proxy
         proxy.setObjectName('settingsCard')
         proxy_layout = QGridLayout(proxy)
         proxy_layout.setContentsMargins(16, 16, 16, 16)
         proxy_layout.setHorizontalSpacing(12)
         proxy_layout.setVerticalSpacing(10)
+        proxy_layout.setColumnStretch(0, 1)
+        proxy_layout.setColumnStretch(1, 1)
         proxy_heading = QLabel('Сетевой прокси-сервер')
         proxy_heading.setObjectName('settingsHeadingAccent')
         proxy_layout.addWidget(proxy_heading, 0, 0, 1, 2)
 
         self.http_port_spin = QSpinBox()
         self.http_port_spin.setRange(1024, 65535)
+        self.http_port_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.http_port_spin.setAccessibleName('HTTP порт')
         self.socks_port_spin = QSpinBox()
         self.socks_port_spin.setRange(1024, 65535)
+        self.socks_port_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.socks_port_spin.setAccessibleName('SOCKS5 порт')
         self.dns_edit = QLineEdit()
         self.dns_edit.setPlaceholderText('1.1.1.1, 8.8.8.8')
 
@@ -701,9 +768,10 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         save_button = QPushButton('Сохранить настройки')
-        save_button.setObjectName('primaryButtonWide')
+        save_button.setObjectName('primaryButton')
+        save_button.setFixedHeight(36)
         save_button.clicked.connect(self.save_settings)
-        layout.addWidget(save_button)
+        layout.addWidget(save_button, 0, Qt.AlignmentFlag.AlignRight)
         return widget
 
     def _build_update_tab(self) -> QWidget:
@@ -728,6 +796,7 @@ class MainWindow(QMainWindow):
         update_copy.addWidget(update_title)
         update_copy.addWidget(self.update_status_label)
         self.auto_update_check = self._make_switch()
+        self.auto_update_check.setAccessibleName('Автоматическое обновление приложения')
         self._connect_switch(self.auto_update_check, self._remember_auto_update)
         auto_update_row = QVBoxLayout()
         auto_update_row.setSpacing(2)
@@ -765,6 +834,7 @@ class MainWindow(QMainWindow):
         labels.setSpacing(1)
         title_label = QLabel(title)
         title_label.setObjectName('settingLabel')
+        title_label.setWordWrap(True)
         hint_label = QLabel(hint)
         hint_label.setObjectName('mutedLabel')
         hint_label.setWordWrap(True)
@@ -773,10 +843,13 @@ class MainWindow(QMainWindow):
         return labels
 
     def _add_setting_row(self, layout: QGridLayout, row: int, title: str, hint: str, control: QWidget) -> None:
+        control.setAccessibleName(title)
+        control.setAccessibleDescription(hint)
         labels = QVBoxLayout()
         labels.setSpacing(2)
         title_label = QLabel(title)
         title_label.setObjectName('settingLabel')
+        title_label.setWordWrap(True)
         labels.addWidget(title_label)
         if hint:
             hint_label = QLabel(hint)
@@ -784,7 +857,7 @@ class MainWindow(QMainWindow):
             hint_label.setWordWrap(True)
             labels.addWidget(hint_label)
         layout.addLayout(labels, row, 0)
-        layout.addWidget(control, row, 1)
+        layout.addWidget(control, row, 1, Qt.AlignmentFlag.AlignRight)
 
     def _create_tray_icon(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -1020,6 +1093,10 @@ class MainWindow(QMainWindow):
                 self.profile_list.setCurrentItem(item)
         if self.profiles and self.profile_list.currentRow() < 0:
             self.profile_list.setCurrentRow(0)
+        has_profiles = bool(self.profiles)
+        self.empty_profiles.setVisible(not has_profiles)
+        self.profile_list.setVisible(has_profiles)
+        self.add_button.setVisible(has_profiles)
         self._sync_profile_buttons()
 
     def _profile_item_widget(self, profile: ConnectionProfile) -> QWidget:
@@ -1043,13 +1120,30 @@ class MainWindow(QMainWindow):
 
         copy = QVBoxLayout()
         copy.setSpacing(0)
-        name = QLabel(profile.name)
+        name = ElidedLabel(profile.name)
         name.setObjectName('profileName')
         protocol = QLabel(protocol_label_for_link(profile.link))
         protocol.setObjectName('profileProtocol')
         copy.addWidget(name)
         copy.addWidget(protocol)
         layout.addLayout(copy, 1)
+        menu_button = QPushButton()
+        menu_button.setObjectName('profileMenuButton')
+        menu_button.setFixedSize(24, 28)
+        dots = QPixmap(16, 16)
+        dots.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(dots)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor('#aeb4c8'))
+        for x in (3, 8, 13):
+            painter.drawEllipse(QRectF(x - 1, 7, 2, 2))
+        painter.end()
+        menu_button.setIcon(QIcon(dots))
+        menu_button.setToolTip('Изменить или удалить профиль')
+        menu_button.setAccessibleName(f'Действия с профилем {profile.name}')
+        menu_button.clicked.connect(lambda _checked=False: self._open_profile_menu(profile.id, menu_button))
+        layout.addWidget(menu_button)
         return row
 
     def _refresh_profile_item_selection(self) -> None:
@@ -1072,17 +1166,35 @@ class MainWindow(QMainWindow):
         return guess_country_code(profile.name, profile.remark, profile.server)
     def _show_profile_context_menu(self, position) -> None:
         item = self.profile_list.itemAt(position)
-        if item is None:
+        if item is None or self.connect_thread is not None or self.disconnect_thread is not None:
             return
         self.profile_list.setCurrentItem(item)
+        self._profile_menu(self.profile_list.mapToGlobal(position))
+
+    def _open_profile_menu(self, profile_id: str, button: QPushButton) -> None:
+        if self.connect_thread is not None or self.disconnect_thread is not None:
+            return
+        for index in range(self.profile_list.count()):
+            item = self.profile_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == profile_id:
+                self.profile_list.setCurrentItem(item)
+                self._profile_menu(button.mapToGlobal(button.rect().bottomLeft()))
+                break
+
+    def _profile_menu(self, position) -> None:
         menu = QMenu(self)
-        edit_action = QAction('Изменить', self)
-        delete_action = QAction('Удалить', self)
+        edit_action = QAction('Изменить', menu)
+        delete_action = QAction('Удалить', menu)
+        edit_action.setEnabled(self.edit_button.isEnabled())
+        delete_action.setEnabled(self.delete_button.isEnabled())
         edit_action.triggered.connect(self.edit_profile)
         delete_action.triggered.connect(self.delete_profile)
         menu.addAction(edit_action)
         menu.addAction(delete_action)
-        menu.exec(self.profile_list.mapToGlobal(position))
+        try:
+            menu.exec(position)
+        finally:
+            menu.deleteLater()
     def _sync_profile_buttons(self) -> None:
         has_profile = self.current_profile() is not None
         running = self.manager.is_running()
@@ -1093,6 +1205,14 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(has_profile and (not running) and (not busy))
         self.disconnect_button.setEnabled(running and not busy)
         self.open_browser_button.setEnabled(bool(self.runtime_state) and running and not busy)
+        self.profile_list.setEnabled(not busy)
+        if not self.runtime_state and not busy:
+            self._update_selected_profile_details()
+
+    def _update_selected_profile_details(self) -> None:
+        profile = self.current_profile()
+        self.status_profile_value.setText(profile.name if profile else '—')
+        self.protocol_label.setText(protocol_label_for_link(profile.link) if profile else '—')
 
     def current_profile(self) -> ConnectionProfile | None:
         item = self.profile_list.currentItem()
@@ -1172,12 +1292,13 @@ class MainWindow(QMainWindow):
         self.connect_thread.start()
 
     def _set_progress_message(self, message: str) -> None:
-        self.status_caption_label.setText(message)
+        self.status_caption_label.setText(sanitize_connection_error(message))
 
     def _on_connected(self, state: object) -> None:
         self.runtime_state = state if isinstance(state, RuntimeState) else None
         self._set_connected(True)
         if isinstance(state, RuntimeState):
+            self.status_caption_label.setText('')
             self.status_profile_value.setText(state.profile_name)
             self.http_port_label.setText(str(state.http_port))
             self.socks_port_label.setText(str(state.socks_port))
@@ -1190,6 +1311,7 @@ class MainWindow(QMainWindow):
         self.refresh_log()
 
     def _on_connect_failed(self, message: str) -> None:
+        message = sanitize_connection_error(message)
         try:
             append_log_entry(message)
         except Exception:
@@ -1198,8 +1320,24 @@ class MainWindow(QMainWindow):
         self._stop_ping_updates()
         self.runtime_state = None
         self._set_connected(False)
-        self.status_caption_label.setText('Ошибка подключения')
-        QMessageBox.critical(self, 'Ошибка подключения', 'Ошибка подключения')
+        self.status_title_label.setText('Не удалось подключиться')
+        self.status_dot.setProperty('connected', 'error')
+        self._refresh_status_dot()
+        self.status_caption_label.setText('Проверьте профиль и доступность сервера, затем повторите попытку. Подробности — в журнале.')
+        error = QMessageBox(self)
+        error.setWindowTitle('Ошибка подключения')
+        error.setIcon(QMessageBox.Icon.Critical)
+        error.setTextFormat(Qt.TextFormat.PlainText)
+        error.setText('Не удалось подключить профиль.')
+        reason = '\n'.join(message.splitlines()[:2])[:350]
+        error.setInformativeText(f'{reason}\n\nПроверьте ссылку профиля и доступность сервера, затем нажмите «Подключить» ещё раз.')
+        error.setDetailedText(message)
+        log_button = error.addButton('Открыть журнал', QMessageBox.ButtonRole.ActionRole)
+        error.addButton('Закрыть', QMessageBox.ButtonRole.RejectRole)
+        error.exec()
+        if error.clickedButton() is log_button:
+            self._set_tab_index(0)
+        error.deleteLater()
         self.refresh_log()
 
     def _on_connect_finished(self) -> None:
@@ -1292,14 +1430,11 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled((not connected) and self.current_profile() is not None and not busy)
         if not connected:
             self.setWindowTitle(f'{APP_NAME} - Настройки')
-            self.status_profile_value.setText('-')
+            self._update_selected_profile_details()
             self.session_value.setText('00:00:00')
             self.latency_value.setText('-')
             self.http_port_label.setText(str(self.settings.http_port))
             self.socks_port_label.setText(str(self.settings.socks_port))
-            self.protocol_label.setText('VLESS')
-            if not self.status_caption_label.text() or 'Подключ' not in self.status_caption_label.text():
-                self.status_caption_label.setText('Клиент proxy находится в режиме ожидания')
 
     def _refresh_status_dot(self) -> None:
         self.status_dot.style().unpolish(self.status_dot)

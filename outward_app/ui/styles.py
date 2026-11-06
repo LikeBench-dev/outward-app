@@ -69,6 +69,9 @@ QLabel#statusDot[connected="true"] {
 QLabel#statusDot[connected="pending"] {
     color: #9B59FF;
 }
+QLabel#statusDot[connected="error"] {
+    color: #d14343;
+}
 QLabel#mutedLabel, QLabel#footerLabel, QLabel#profileSummary {
     color: #9198ad;
 }
@@ -107,7 +110,7 @@ QFrame#profileDialogPanel {
     background: #303050;
     border-color: #6e48b7;
 }
-QFrame#inlineSwitch, QFrame#connectionTools {
+QFrame#inlineSwitch, QFrame#connectionTools, QFrame#statusActions, QFrame#emptyProfiles {
     background: transparent;
     border: none;
 }
@@ -238,6 +241,26 @@ QFrame#inputShell {
     border-radius: 4px;
     min-height: 34px;
 }
+QFrame#inputShell[invalid="true"] {
+    border-color: #d14343;
+}
+QPushButton#protocolPill {
+    background: #181829;
+    border: 1px solid #26263b;
+    color: #9ca3b8;
+    border-radius: 14px;
+    padding: 6px 8px;
+    font-size: 11px;
+}
+QPushButton#protocolPill:checked {
+    background: #9B59FF;
+    color: #ffffff;
+    border-color: #9B59FF;
+}
+QPushButton#protocolPill:disabled {
+    color: #73798b;
+    border-color: #202033;
+}
 QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button {
     width: 26px;
     border: none;
@@ -266,6 +289,9 @@ QPushButton:hover {
 QPushButton:pressed {
     background: #181828;
 }
+QPushButton:focus, QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QComboBox:focus {
+    border-color: #b98cff;
+}
 QPushButton:disabled {
     color: #70778c;
     background: #171725;
@@ -282,6 +308,11 @@ QPushButton#primaryButton:hover, QPushButton#primaryButtonWide:hover, QPushButto
 }
 QPushButton#primaryButtonWide {
     min-height: 36px;
+}
+QPushButton#primaryButton:disabled, QPushButton#primaryButtonWide:disabled {
+    color: #70778c;
+    background: #171725;
+    border-color: #222236;
 }
 QPushButton#sideAddButton {
     text-align: left;
@@ -333,6 +364,18 @@ QPushButton#iconButton {
     padding: 0;
     font-size: 16px;
 }
+QPushButton#profileMenuButton {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #aeb4c8;
+    padding: 0;
+    font-size: 18px;
+}
+QPushButton#profileMenuButton:hover, QPushButton#profileMenuButton:focus {
+    background: #282842;
+    border-color: #9B59FF;
+    color: #ffffff;
+}
 QPushButton#pasteButton {
     background: #241b43;
     border-color: #3f2a75;
@@ -352,23 +395,6 @@ QPushButton#launchManageButton {
 QPushButton#launchManageButton:hover {
     background: #3a3a60;
     border-color: #7f54d9;
-}
-QPushButton#protocolPill {
-    background: #181829;
-    border: 1px solid #26263b;
-    color: #9ca3b8;
-    border-radius: 14px;
-    padding: 6px 8px;
-    font-size: 11px;
-}
-QPushButton#protocolPill:checked {
-    background: #9B59FF;
-    color: #ffffff;
-    border-color: #9B59FF;
-}
-QPushButton#protocolPill:disabled {
-    color: #73798b;
-    border-color: #202033;
 }
 QLabel#dialogBadge {
     min-width: 28px;
@@ -405,7 +431,7 @@ QPushButton#pivotTab[selected="true"] {
     color: #F8FAFC;
     border-bottom: 2px solid #9B59FF;
 }
-QStackedWidget#contentStack {
+QWidget#contentStack {
     background: transparent;
     border: none;
 }

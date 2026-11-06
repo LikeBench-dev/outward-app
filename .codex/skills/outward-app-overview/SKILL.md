@@ -13,7 +13,7 @@ Use this overview before broad source exploration. Read only the files relevant 
 
 - Runtime: Python 3.11+, PySide6 GUI.
 - Entrypoint: `outward_app/__main__.py` calls `outward_app.ui.app.run`.
-- UI app setup: `outward_app/ui/app.py` creates `QApplication`, sets the visible app name to `Outward App`, applies `APP_STYLE`, loads `outward.ico`, opens `MainWindow`.
+- UI app setup: `outward_app/ui/app.py` creates `QApplication`, installs application-wide pointer cursors from `ui/widgets.py` for enabled interactive controls and popup actions, sets the visible app name to `Outward App`, applies `APP_STYLE`, loads `outward.ico`, opens `MainWindow`.
 - Runtime data lives in `%LOCALAPPDATA%\OutwardApp`; if `LOCALAPPDATA` is absent, it falls back to `~/.outwardapp`.
 - Runtime files: `config.json`, `profiles.json`, `settings.json`, `sing-box.log` for the current app run, `sing-box.log.1` for the previous app run, `sing-box-sessions.json`, the managed `bin/sing-box.exe` runtime copy, downloaded update installers under `updates/`, and browser profile directories such as `chrome_proxy_profile_<port>`.
 - App version is resolved by `outward_app/version.py`: frozen builds read the Windows file version from the executable first, then fall back to bundled/source `VERSION`.
@@ -39,9 +39,18 @@ Use this overview before broad source exploration. Read only the files relevant 
 - Shadowsocks: supported through `ss://` parsing and a `shadowsocks` outbound tagged `proxy`.
 - WireGuard: WireGuard config text is parsed and emitted as a modern `wireguard` endpoint tagged `proxy`. The old WireGuard outbound is intentionally not used because newer `sing-box` versions removed it.
 
+## Design Guidance
+
+- Root `PRODUCT.md` records repository-backed product and platform context; root `DESIGN.md` records the current Qt palette, typography, layout and component conventions. Verify relevant source before changing them.
+- `.codex/skills/impeccable/SKILL.md` provides Impeccable design playbooks with a local Windows/PySide6 integration in `reference/outward-qt.md`. Use that path for frontend work to preserve the existing system; browser Live Mode and detector hooks are not Qt validation.
+
 ## UI Flow
 
-- Main UI: `outward_app/ui/main_window.py`.
+- Main UI: `outward_app/ui/main_window.py`. Below 760px of usable content width, settings stack vertically and connection actions move below status details; horizontal clipping is avoided with wrapped labels and viewport-driven layout changes.
+- `outward_app/ui/widgets.py` provides `ElidedLabel` (full accessible text/tooltip, elided rendering), `StatusCaption` (empty captions collapse), and `CurrentPageStack` backed by `CurrentPageLayout`. Both size hints and layout-level height-for-width follow only the active tab. The default 1100x750 window must show all standard tabs and the footer without an outer scrollbar; verify on the native Windows Qt plugin as well as offscreen. Settings dropdowns stay compact and the save action is a 36px primary button aligned right.
+- `SwitchControl` keeps its custom painting but derives from `QCheckBox` for Tab/Space and native accessible role/state. Setting rows supply accessible names; focus is painted in violet.
+- Profiles have a visible three-dot action menu and an empty state with an add action. The profile dialog preserves five protocol pills with enabled/disabled availability and tooltips; a valid pasted link selects its protocol automatically, and invalid input receives inline validation. The resources dialog commits drafts on selection changes and Done, rejecting blank/duplicate entries.
+- Progress and recovery details are visible when relevant; routine idle/connected captions collapse to retain the original compact header height. Disconnected protocol/name reflect the selected profile; an active session retains its own metadata when selection changes. Connection errors show sanitized details, recovery guidance and an Open Log action; embedded ss/vless URLs are redacted.
 - General settings include `auto_connect_on_startup`; when enabled, the app registers itself in Windows autostart and starts connecting to the selected profile shortly after the UI loads.
 - Profile dialog: `outward_app/ui/dialogs.py`.
 - Stylesheet: `outward_app/ui/styles.py`; the app uses a dark midnight/violet palette with orange, green, and muted slate accents. `outward_app/ui/app.py` applies `qfluentwidgets` dark theme when `PySide6-Fluent-Widgets` is installed, then layers the custom stylesheet on top. Visible UI text is mostly Russian.
@@ -72,7 +81,7 @@ Disconnect flow stops only the `SingBoxManager` process owned by this app instan
 
 ## Tests And Commands
 
-- Core tests live in `tests/test_core.py`.
+- Core tests live in `tests/test_core.py`; focused Qt behavioral regressions live in `tests/test_ui.py`, including a separate hidden native Windows process checking default window height on every tab. UI tests use synthetic in-memory profiles and mock network/process/startup/update boundaries.
 - Run tests with `.\.venv\Scripts\python.exe -m unittest discover -s tests`.
 - Run syntax checks with `.\.venv\Scripts\python.exe -m compileall outward_app tests`.
 - Run the app with `.\.venv\Scripts\python.exe -m outward_app`.
@@ -81,7 +90,7 @@ Disconnect flow stops only the `SingBoxManager` process owned by this app instan
 - Silent update installation launches the downloaded Inno Setup installer with `/SILENT /NORESTART`; the installer has a `skipifnotsilent` run entry so the updated app starts again after a silent update.
 - GitHub Actions workflow `.github/workflows/release.yml` publishes releases automatically on push to `master` when `VERSION` changes. It installs Python deps, Inno Setup, sing-box via `install-deps.ps1`, runs tests, builds with `-NoVersionBump`, and publishes `v<version>` with installer and `.sha256`. Manual publishing remains available with `.\build-installer.ps1 -NoVersionBump -PublishRelease` when `gh` is authenticated.
 
-Prefer unit tests for parser, config generation, storage, and path/data behavior. GUI behavior currently has no dedicated automated test harness, so verify high-risk UI changes manually or with focused tests around extracted logic.
+Prefer unit tests for parser, config generation, storage, and path/data behavior. Offscreen GUI tests cover compact/wide layouts, profile/session metadata, visible safe errors, keyboard/accessibility state, profile validation and resource editing. They do not replace native on-screen checks for Windows screen readers, monitor changes or real network sessions; verify those when relevant.
 
 ## Change Guidance
 
