@@ -1,19 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import ssl
+from pathlib import Path
+from PySide6.QtCore import QLibraryInfo
 
 from outward_app.app_info import APP_NAME
 
 
 block_cipher = None
+runtime_data = [('assets/outward.ico', 'assets'), ('assets/outward.png', 'assets'), ('VERSION', '.'),
+                ('dist/OutwardVPNService', 'vpn-service'), ('assets/flags', 'assets/flags')]
+runtime_data.append((str(Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)) / 'qtbase_ru.qm'),
+                     'assets/translations'))
+ssl_policy = Path(ssl.__file__).with_name('codex-rejected-cas.pem')
+if ssl_policy.is_file():
+    runtime_data.append((str(ssl_policy), '.'))
 
 
 a = Analysis(
     ['outward_app/__main__.py'],
     pathex=[],
     binaries=[('bin/sing-box.exe', '.')],
-    datas=[('assets/outward.ico', 'assets'), ('assets/outward.png', 'assets'), ('VERSION', '.')],
-    hiddenimports=[],
+    datas=runtime_data,
+    hiddenimports=['PySide6.QtSvg'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

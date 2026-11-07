@@ -1,6 +1,7 @@
 param(
     [string]$Version,
     [switch]$NoVersionBump,
+    [switch]$CommitRelease,
     [switch]$PublishRelease,
     [string]$Repository = "LikeBench-dev/outward-app",
     [string]$ReleaseNotesFile,
@@ -141,6 +142,43 @@ function Get-NextPatchVersion {
 
     $parts[2] = $parts[2] + 1
     return ($parts -join ".")
+}
+
+function Invoke-ReleaseGit {
+    param([string[]]$Arguments)
+
+    $output = & git -C $Root @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "git $($Arguments -join ' ') failed (exit $LASTEXITCODE)."
+    }
+    return $output
+}
+
+function Assert-ReleaseCommitReady {
+    Get-Command git -ErrorAction Stop | Out-Null
+    $repoRoot = Invoke-ReleaseGit -Arguments @('rev-parse', '--show-toplevel')
+    if ([IO.Path]::GetFullPath($repoRoot) -ne [IO.Path]::GetFullPath($Root)) {
+        throw "The build script must be at the Git repository root to commit a release."
+    }
+    Invoke-ReleaseGit -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD') | Out-Null
+    if (Invoke-ReleaseGit -Arguments @('ls-files', '--unmerged')) {
+        throw "Resolve Git conflicts before committing a release."
+    }
+    Invoke-ReleaseGit -Arguments @('var', 'GIT_AUTHOR_IDENT') | Out-Null
+    Invoke-ReleaseGit -Arguments @('var', 'GIT_COMMITTER_IDENT') | Out-Null
+    $headVersion = (Invoke-ReleaseGit -Arguments @('show', 'HEAD:VERSION')).Trim()
+    if (-not (Test-AppVersion -AppVersion $headVersion) -or [version]$Version -le [version]$headVersion) {
+        throw "-CommitRelease requires a version newer than HEAD:VERSION ($headVersion)."
+    }
+    if (Invoke-ReleaseGit -Arguments @('tag', '--list', "v$Version")) {
+        throw "Local tag v$Version already exists. Choose a newer -Version."
+    }
+    Write-Host "After a successful build, all non-ignored changes will be committed as: Release v$Version"
+}
+
+function New-ReleaseCommit {
+    Invoke-ReleaseGit -Arguments @('add', '--all') | Out-Null
+    Invoke-ReleaseGit -Arguments @('commit', '-m', "Release v$Version") | ForEach-Object { Write-Host $_ }
 }
 
 function Write-VersionInfo {
@@ -312,6 +350,10 @@ if (-not (Test-AppVersion -AppVersion $Version)) {
     throw "Version must use format 1.2.3 or 1.2.3.4. Current value: $Version"
 }
 
+if ($CommitRelease) {
+    Assert-ReleaseCommitReady
+}
+
 Set-Content -LiteralPath $VersionFile -Value $Version -Encoding ASCII
 
 Ensure-SingBoxDependency
@@ -331,7 +373,14 @@ Write-Host "Inno Setup: $innoCompiler"
 Write-VersionInfo -AppVersion $Version
 
 Write-Host "Building application exe..."
+& $python -m PyInstaller --clean --noconfirm (Join-Path $Root "OutwardVPNService.spec")
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller could not build the VPN service."
+}
 & $python -m PyInstaller --clean --noconfirm (Join-Path $Root "OutwardApp.spec")
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed (exit $LASTEXITCODE)."
+}
 
 if (-not (Test-Path $DistExe)) {
     throw "PyInstaller did not create $DistExe"
@@ -339,6 +388,9 @@ if (-not (Test-Path $DistExe)) {
 
 Write-Host "Building installer..."
 & $innoCompiler "/DProjectRoot=$Root" "/DAppVersion=$Version" "/DAppName=$AppName" $InstallerScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Inno Setup failed (exit $LASTEXITCODE)."
+}
 
 $installer = Join-Path $Root "installer-output\$AppName Setup-$Version.exe"
 if (-not (Test-Path $installer)) {
@@ -349,6 +401,10 @@ $releaseArtifacts = Write-ReleaseArtifacts -InstallerPath $installer -AppVersion
 Write-Host "SHA256: $($releaseArtifacts.Sha256)"
 Write-Host "Checksum: $($releaseArtifacts.ChecksumFile)"
 Write-Host "Release notes: $($releaseArtifacts.ReleaseNotesFile)"
+
+if ($CommitRelease) {
+    New-ReleaseCommit
+}
 
 if ($PublishRelease) {
     Publish-GitHubRelease -Tag "v$Version" -AppVersion $Version -Artifacts $releaseArtifacts

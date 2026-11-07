@@ -1,29 +1,34 @@
-APP_STYLE = """
+from string import Template
+
+from outward_app.ui.themes import theme_colors
+
+
+_APP_TEMPLATE = """
 * {
     font-family: Segoe UI, Arial, sans-serif;
     font-size: 13px;
     letter-spacing: 0px;
 }
 QWidget {
-    background: #11111d;
-    color: #f4f1ff;
+    background: $canvas;
+    color: $text;
 }
 QMainWindow, QWidget#appRoot {
-    background: #11111d;
+    background: $canvas;
 }
 QDialog {
     background: transparent;
 }
 QLabel {
     background: transparent;
-    color: #f6f3ff;
+    color: $text;
 }
 QFrame#sidebar {
-    background: #0c0c16;
-    border-right: 1px solid #202033;
+    background: $sidebar;
+    border-right: 1px solid $border;
 }
 QWidget#content, QScrollArea#contentScroll, QScrollArea#contentScroll > QWidget {
-    background: #1a1a2c;
+    background: $canvas;
     border: none;
 }
 QLabel#sidebarLogo {
@@ -41,57 +46,57 @@ QLabel#heroLogo {
 QLabel#brandTitle {
     font-size: 16px;
     font-weight: 700;
-    color: #ffffff;
+    color: $text;
 }
 QLabel#brandSubtitle {
     font-size: 10px;
     font-weight: 700;
-    color: #9B59FF;
+    color: $accent;
 }
 QLabel#sectionTitle, QLabel#metricTitle {
-    color: #82889d;
+    color: $muted;
     font-size: 11px;
     font-weight: 600;
 }
 QLabel#statusTitle {
     font-size: 16px;
     font-weight: 700;
-    color: #ffffff;
+    color: $text;
 }
 QLabel#statusDot {
-    color: #ffbf32;
+    color: $warning;
     font-size: 15px;
     font-weight: 900;
 }
 QLabel#statusDot[connected="true"] {
-    color: #26d98a;
+    color: $success;
 }
 QLabel#statusDot[connected="pending"] {
-    color: #9B59FF;
+    color: $accent;
 }
 QLabel#statusDot[connected="error"] {
-    color: #d14343;
+    color: $error;
 }
 QLabel#mutedLabel, QLabel#footerLabel, QLabel#profileSummary {
-    color: #9198ad;
+    color: $muted;
 }
 QLabel#footerLabel {
-    color: #666d82;
+    color: $muted;
     padding: 0;
 }
 QLabel#statusMetricValue {
-    color: #9B59FF;
+    color: $accent;
     font-size: 13px;
     font-weight: 700;
 }
 QLabel#metricValue {
-    color: #9B59FF;
+    color: $accent;
     font-size: 16px;
     font-weight: 700;
 }
 QFrame#statusPanel, QFrame#metricCard, QFrame#settingsCard, QFrame#updatePanel, QFrame#profileDialogPanel {
-    background: #303050;
-    border: 1px solid #47456f;
+    background: $panel;
+    border: 1px solid $border;
     border-radius: 8px;
 }
 QFrame#statusPanel {
@@ -107,31 +112,31 @@ QFrame#updatePanel {
     min-height: 62px;
 }
 QFrame#profileDialogPanel {
-    background: #303050;
-    border-color: #6e48b7;
+    background: $panel;
+    border-color: $control_border;
 }
 QFrame#inlineSwitch, QFrame#connectionTools, QFrame#statusActions, QFrame#emptyProfiles {
     background: transparent;
     border: none;
 }
 QFrame#launchTarget {
-    background: #303050;
-    border: 1px solid rgba(255, 255, 255, 15);
+    background: $panel;
+    border: 1px solid $border;
     border-radius: 4px;
     min-height: 34px;
     max-height: 34px;
 }
 QLabel#tinyLabel {
-    color: #94A3B8;
+    color: $muted;
     font-size: 11px;
 }
 QLabel#settingsHeading, QLabel#settingsHeadingAccent {
-    color: #9B59FF;
+    color: $accent;
     font-size: 15px;
     font-weight: 700;
 }
 QLabel#settingLabel, QLabel#fieldLabel {
-    color: #ffffff;
+    color: $text;
     font-weight: 600;
 }
 QListWidget {
@@ -153,8 +158,8 @@ QListWidget::item:hover {
     background: transparent;
 }
 QListWidget#launchSiteList {
-    background: #252543;
-    border: 1px solid #403f66;
+    background: $input;
+    border: 1px solid $control_border;
     border-radius: 4px;
     padding: 6px;
 }
@@ -163,14 +168,36 @@ QListWidget#launchSiteList::item {
     padding: 7px 10px;
     border-radius: 4px;
     background: transparent;
-    color: #f4f1ff;
+    color: $text;
 }
 QListWidget#launchSiteList::item:selected {
-    background: #3a315b;
-    color: #ffffff;
+    background: $selection;
+    color: $text;
 }
 QListWidget#launchSiteList::item:hover {
-    background: #302d4f;
+    background: $hover;
+}
+QWidget#autoConnectSettings {
+    background: transparent;
+}
+QListWidget#autoConnectList {
+    background: $input;
+    border: 1px solid $border;
+    border-radius: 4px;
+    padding: 3px;
+}
+QListWidget#autoConnectList:focus {
+    border-color: $accent;
+}
+QListWidget#autoConnectList::item {
+    min-height: 28px;
+    color: $text;
+}
+QListWidget#autoConnectList::item:hover, QListWidget#autoConnectList::item:focus {
+    background: $selection;
+}
+QListWidget#autoConnectList::item:disabled {
+    color: $muted;
 }
 QFrame#profileRow {
     background: transparent;
@@ -178,55 +205,57 @@ QFrame#profileRow {
     border-radius: 4px;
 }
 QFrame#profileRow[selected="true"] {
-    background: rgba(155, 89, 255, 16);
+    background: $selection;
 }
 QFrame#profileAccent {
     background: transparent;
     border-radius: 2px;
 }
 QFrame#profileRow[selected="true"] QFrame#profileAccent {
-    background: #9B59FF;
+    background: $accent;
 }
 QLabel#profileCountryBadge {
-    background: rgba(255, 255, 255, 12);
-    border: 1px solid rgba(255, 255, 255, 20);
+    background: $raised;
+    border: 1px solid $border;
     border-radius: 4px;
-    color: #F8FAFC;
+    color: $text;
     font-size: 10px;
     font-weight: 700;
 }
 QLabel#profileName {
-    color: #8f96a8;
+    color: $muted;
     font-weight: 500;
 }
 QFrame#profileRow[selected="true"] QLabel#profileName {
-    color: #ffffff;
+    color: $text;
     font-weight: 700;
 }
 QLabel#profileProtocol {
-    color: #60687b;
+    color: $muted;
     font-size: 10px;
     font-weight: 700;
 }
 QFrame#profileRow[selected="true"] QLabel#profileProtocol {
-    color: #b98cff;
+    color: $accent;
 }
 QPlainTextEdit, QLineEdit, QTextEdit, QSpinBox, QComboBox {
-    background: #111120;
-    border: 1px solid #25253a;
+    background: $input;
+    border: 1px solid $control_border;
     border-radius: 4px;
     padding: 8px 10px;
-    color: #f8f4ff;
-    selection-background-color: #9B59FF;
+    color: $text;
+    selection-background-color: $selection_text_bg;
+    selection-color: $selection_text;
+    placeholder-text-color: $muted;
 }
 QPlainTextEdit {
     font-family: Cascadia Mono, Consolas, monospace;
-    color: #9da4b8;
+    color: $muted;
     line-height: 1.25;
 }
 QPlainTextEdit#logConsole {
-    background: #10101e;
-    border-color: #18182a;
+    background: $input;
+    border-color: $border;
     border-radius: 8px;
     padding: 14px;
 }
@@ -236,30 +265,39 @@ QLineEdit#flatLineEdit {
     padding: 8px 10px;
 }
 QFrame#inputShell {
-    background: #111120;
-    border: 1px solid #25253a;
+    background: $input;
+    border: 1px solid $control_border;
     border-radius: 4px;
     min-height: 34px;
 }
 QFrame#inputShell[invalid="true"] {
-    border-color: #d14343;
+    border-color: $error;
 }
 QPushButton#protocolPill {
-    background: #181829;
-    border: 1px solid #26263b;
-    color: #9ca3b8;
+    background: $raised;
+    border: 1px solid $control_border;
+    color: $muted;
     border-radius: 14px;
     padding: 6px 8px;
     font-size: 11px;
 }
 QPushButton#protocolPill:checked {
-    background: #9B59FF;
-    color: #ffffff;
-    border-color: #9B59FF;
+    background: $primary;
+    color: $on_primary;
+    border-color: $primary;
 }
 QPushButton#protocolPill:disabled {
-    color: #73798b;
-    border-color: #202033;
+    color: $disabled_text;
+    border-color: $border;
+}
+QLabel#detectedProtocol {
+    background: $selection;
+    color: $accent;
+    border: 1px solid $control_border;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 700;
 }
 QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button {
     width: 26px;
@@ -267,146 +305,139 @@ QComboBox::drop-down, QSpinBox::up-button, QSpinBox::down-button {
     background: transparent;
 }
 QComboBox QAbstractItemView {
-    background: #0A0B14;
-    border: 1px solid rgba(255, 255, 255, 15);
+    background: $raised;
+    border: 1px solid $border;
     border-radius: 4px;
-    color: #F8FAFC;
-    selection-background-color: rgba(155, 89, 255, 32);
+    color: $text;
+    selection-background-color: $selection;
     outline: none;
 }
 QPushButton {
-    background: #202033;
-    border: 1px solid #2b2b42;
+    background: $raised;
+    border: 1px solid $control_border;
     border-radius: 4px;
     padding: 8px 14px;
-    color: #f6f2ff;
+    color: $text;
     font-weight: 700;
 }
 QPushButton:hover {
-    background: #282842;
-    border-color: #7f54d9;
+    background: $hover;
+    border-color: $focus;
 }
 QPushButton:pressed {
-    background: #181828;
+    background: $pressed;
 }
 QPushButton:focus, QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QComboBox:focus {
-    border-color: #b98cff;
+    border-color: $accent;
 }
 QPushButton:disabled {
-    color: #70778c;
-    background: #171725;
-    border-color: #222236;
+    color: $disabled_text;
+    background: $disabled_bg;
+    border-color: $border;
 }
-QPushButton#primaryButton, QPushButton#primaryButtonWide, QPushButton#addProfileButton, QPushButton#sideAddButton {
-    background: #9B59FF;
-    border-color: #9B59FF;
-    color: #ffffff;
+QPushButton#primaryButton, QPushButton#primaryButtonWide, QPushButton#addProfileButton {
+    background: $primary;
+    border-color: $primary;
+    color: $on_primary;
 }
-QPushButton#primaryButton:hover, QPushButton#primaryButtonWide:hover, QPushButton#addProfileButton:hover, QPushButton#sideAddButton:hover {
-    background: #b975ff;
-    border-color: #b975ff;
+QPushButton#primaryButton:hover, QPushButton#primaryButtonWide:hover, QPushButton#addProfileButton:hover {
+    background: $primary_hover;
+    border-color: $primary_hover;
 }
 QPushButton#primaryButtonWide {
     min-height: 36px;
 }
 QPushButton#primaryButton:disabled, QPushButton#primaryButtonWide:disabled {
-    color: #70778c;
-    background: #171725;
-    border-color: #222236;
-}
-QPushButton#sideAddButton {
-    text-align: left;
-    background: #151521;
-    border-color: #151521;
-    color: #9da4b8;
-    padding-left: 12px;
+    color: $disabled_text;
+    background: $disabled_bg;
+    border-color: $border;
 }
 QPushButton#ghostButton {
     background: transparent;
     border-color: transparent;
-    color: #bdc3d2;
+    color: $muted;
 }
 QPushButton#outlineButton {
     background: transparent;
-    border-color: #9B59FF;
-    color: #bd86ff;
+    border-color: $accent;
+    color: $accent;
 }
 QPushButton#successButton {
-    background: #1f9d62;
-    border-color: #1f9d62;
-    color: #ffffff;
+    background: $primary;
+    border-color: $primary;
+    color: $on_primary;
 }
 QPushButton#successButton:hover {
-    background: #27b874;
-    border-color: #27b874;
+    background: $primary_hover;
+    border-color: $primary_hover;
 }
 QPushButton#successButton:pressed {
-    background: #187f4f;
-    border-color: #187f4f;
+    background: $primary_pressed;
+    border-color: $primary_pressed;
 }
 QPushButton#dangerButton {
-    background: #d14343;
-    border-color: #d14343;
-    color: #ffffff;
+    background: $danger_bg;
+    border-color: $danger_bg;
+    color: $on_danger;
 }
 QPushButton#dangerButton:hover {
-    background: #e05252;
-    border-color: #e05252;
+    background: $danger_hover;
+    border-color: $danger_hover;
 }
 QPushButton#dangerButton:pressed {
-    background: #a93232;
-    border-color: #a93232;
+    background: $danger_pressed;
+    border-color: $danger_pressed;
 }
 QPushButton#iconButton {
     background: transparent;
     border-color: transparent;
-    color: #aeb4c8;
+    color: $muted;
     padding: 0;
     font-size: 16px;
 }
 QPushButton#profileMenuButton {
     background: transparent;
     border: 1px solid transparent;
-    color: #aeb4c8;
+    color: $muted;
     padding: 0;
     font-size: 18px;
 }
 QPushButton#profileMenuButton:hover, QPushButton#profileMenuButton:focus {
-    background: #282842;
-    border-color: #9B59FF;
-    color: #ffffff;
+    background: $hover;
+    border-color: $accent;
+    color: $text;
 }
 QPushButton#pasteButton {
-    background: #241b43;
-    border-color: #3f2a75;
-    color: #b781ff;
+    background: $selection;
+    border-color: $control_border;
+    color: $accent;
     padding: 0;
     font-size: 15px;
 }
 QPushButton#launchManageButton {
-    background: #303050;
-    border: 1px solid rgba(255, 255, 255, 15);
+    background: $panel;
+    border: 1px solid $border;
     border-radius: 4px;
-    color: #ffffff;
+    color: $text;
     padding: 0;
     font-size: 18px;
     font-weight: 700;
 }
 QPushButton#launchManageButton:hover {
-    background: #3a3a60;
-    border-color: #7f54d9;
+    background: $hover;
+    border-color: $focus;
 }
 QLabel#dialogBadge {
     min-width: 28px;
     min-height: 28px;
     border-radius: 4px;
-    background: #47257a;
-    color: #c697ff;
+    background: $selection;
+    color: $accent;
     font-size: 22px;
     font-weight: 600;
 }
 QLabel#dialogTitle {
-    color: #ffffff;
+    color: $text;
     font-size: 20px;
     font-weight: 700;
 }
@@ -418,25 +449,25 @@ QPushButton#pivotTab {
     background: transparent;
     border: none;
     border-radius: 0;
-    color: #6f778c;
+    color: $muted;
     padding: 8px 0 7px 0;
     font-size: 13px;
     font-weight: 600;
 }
 QPushButton#pivotTab:hover {
-    color: #d4d8e6;
+    color: $text;
     background: transparent;
 }
 QPushButton#pivotTab[selected="true"] {
-    color: #F8FAFC;
-    border-bottom: 2px solid #9B59FF;
+    color: $text;
+    border-bottom: 2px solid $accent;
 }
 QWidget#contentStack {
     background: transparent;
     border: none;
 }
 QWidget#settingsTabPage, QWidget#logsTabPage, QWidget#updateTabPage {
-    background: #1a1a2c;
+    background: $canvas;
 }
 QScrollBar:vertical {
     background: transparent;
@@ -445,12 +476,12 @@ QScrollBar:vertical {
     border: none;
 }
 QScrollBar::handle:vertical {
-    background: #44405f;
+    background: $scrollbar;
     border-radius: 4px;
     min-height: 48px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #585276;
+    background: $scrollbar_hover;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     width: 0;
@@ -472,38 +503,241 @@ QScrollBar::handle:horizontal, QScrollBar::add-line:horizontal, QScrollBar::sub-
 }
 
 QFrame#dialogOverlay {
-    background: rgba(0, 0, 0, 128);
+    background: $overlay;
     border: none;
 }
 QComboBox#launchCombo {
-    background: #303050;
+    background: $panel;
     border: none;
     padding: 5px 8px;
-    color: #ffffff;
+    color: $text;
     font-weight: 700;
 }
 QComboBox#launchCombo QLineEdit {
     background: transparent;
     border: none;
     padding: 0;
-    color: #ffffff;
+    color: $text;
     font-weight: 700;
 }
 QLabel#launchHint {
-    color: #8f96aa;
+    color: $muted;
     font-size: 10px;
 }
 QLabel#launchChevron {
-    color: #94A3B8;
+    color: $muted;
     font-size: 10px;
     font-weight: 700;
 }
 QTextEdit#logConsole {
-    background: #10101e;
-    border: 1px solid #18182a;
+    background: $input;
+    border: 1px solid $border;
     border-radius: 6px;
     padding: 14px;
 }
 """
 
 
+
+
+_CONNECTIONS_TEMPLATE = """
+QWidget#settingsRoute { background: $canvas; }
+QPushButton#sideAddButton, QPushButton#sideSettingsButton {
+    background: $raised;
+    color: $muted;
+    border: 1px solid transparent;
+    text-align: left;
+    padding: 8px 12px;
+}
+QPushButton#sideAddButton:hover, QPushButton#sideSettingsButton:hover { background: $border; color: $text; }
+QPushButton#sideSettingsButton[selected="true"] {
+    background: $selection;
+    border-color: $border;
+    color: $accent;
+}
+QFrame#connectionCard {
+    background: $panel;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QWidget#connectionsDashboard, QWidget#windowsList,
+QScrollArea#windowsScroll, QScrollArea#windowsScroll > QWidget,
+QScrollArea#legacyToolsScroll, QScrollArea#legacyToolsScroll > QWidget {
+    background: $canvas;
+    border: none;
+}
+QPushButton#connectionProfile {
+    color: $accent;
+    background: transparent;
+    border: none;
+    text-align: left;
+    padding: 0;
+    font-size: 11px;
+}
+QPushButton#connectionProfile:hover { color: $text; }
+QPushButton#connectionProfile:focus { border: 1px dotted $accent; }
+QLabel#connectionMetadata { color: $muted; font-size: 11px; }
+QLabel#connectionPorts { color: $text; font-size: 13px; }
+QLabel#connectionState { color: $muted; font-size: 13px; }
+QLabel#connectionState[active="true"] { color: $success; }
+QWidget#connectionAutoGroup { background: transparent; }
+QFrame#connectionCard QComboBox#launchCombo {
+    background: $raised;
+    border: 1px solid $border;
+    border-radius: 4px;
+    padding: 6px 28px 6px 10px;
+    min-height: 20px;
+}
+QLabel#connectionMessage { color: $warning; font-size: 12px; }
+QLabel#connectionMessage[error="true"] { color: $error; }
+QFrame#connectionDivider { background: $border; border: none; }
+QFrame#connectionCard QLabel#connectionPorts { font-size: 12px; }
+QFrame#connectionCard QLabel#connectionMetadata { font-size: 12px; }
+QFrame#connectionCard QPushButton#connectionProfile { font-size: 12px; }
+QFrame#connectionCard QLabel#launchHint { font-size: 12px; color: $muted; }
+QPushButton#connectionPower {
+    background: transparent;
+    border: 1px solid $border;
+    outline: none;
+    border-radius: 6px;
+    padding: 0;
+}
+QPushButton#connectionPower:hover { background: $raised; border-color: $control_border; }
+QPushButton#connectionPower:pressed { background: $pressed; }
+QPushButton#connectionPower:focus[keyboardFocus="true"] { border: 1px solid $accent; }
+QFrame#statusPanel QLabel#systemMetricValue {
+    color: $text;
+    font-size: 14px;
+    font-weight: 600;
+}
+QFrame#statusPanel QPushButton#connectionProfile,
+QFrame#statusPanel QPushButton#connectionProfile:disabled {
+    color: $text;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#systemProtocol { color: $muted; font-size: 12px; }
+QPushButton#systemModeOption {
+    background: $input;
+    color: $muted;
+    border: 1px solid $control_border;
+    border-radius: 0;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#systemModeOption[edge="left"] { border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
+QPushButton#systemModeOption[edge="right"] { border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
+QPushButton#systemModeOption:hover { background: $hover; color: $text; }
+QPushButton#systemModeOption:checked { background: $raised; color: $text; border-color: $accent; }
+QPushButton#systemModeOption:pressed { background: $pressed; }
+QPushButton#systemModeOption:disabled { color: $disabled_text; border-color: $border; }
+QPushButton#systemModeOption:checked:disabled { color: $muted; }
+QPushButton#systemModeOption:focus { border: 1px solid $focus; }
+QFrame#statusPanel QPushButton#connectionPower[connected="true"] {
+    background: $success_surface;
+    border-color: $success;
+}
+QFrame#statusPanel QPushButton#connectionPower[connected="true"]:hover { background: $hover; }
+QFrame#statusPanel QPushButton#connectionPower[connected="true"]:pressed { background: $pressed; }
+QFrame#statusPanel QPushButton#connectionPower[connected="true"]:focus[keyboardFocus="true"] {
+    border-color: $accent;
+}
+QSplitter::handle:vertical { background: $border; height: 4px; }
+"""
+
+
+_EXTRA_TEMPLATE = """
+QListView#singleSelectPopup {
+    background: $raised;
+    color: $text;
+    border: 1px solid $control_border;
+    padding: 4px;
+    outline: none;
+}
+QListView#singleSelectPopup::item {
+    min-height: 28px;
+    padding: 0 8px;
+    border-radius: 4px;
+}
+QListView#singleSelectPopup::item:selected {
+    background: $selection;
+    color: $text;
+}
+QListView#singleSelectPopup::item:hover { background: $hover; }
+QPushButton#primaryButton:pressed, QPushButton#primaryButtonWide:pressed,
+QPushButton#addProfileButton:pressed {
+    background: $primary_pressed;
+    border-color: $primary_pressed;
+}
+QPushButton#successButton:disabled, QPushButton#dangerButton:disabled,
+QPushButton#addProfileButton:disabled {
+    background: $disabled_bg;
+    border-color: $border;
+    color: $disabled_text;
+}
+QPushButton#outlineButton:hover, QPushButton#ghostButton:hover,
+QPushButton#iconButton:hover, QPushButton#pasteButton:hover {
+    background: $hover;
+    color: $text;
+    border-color: $control_border;
+}
+QPushButton#outlineButton:pressed, QPushButton#ghostButton:pressed {
+    background: $pressed;
+}
+QPushButton#outlineButton:disabled, QPushButton#connectionProfile:disabled {
+    color: $disabled_text;
+    border-color: transparent;
+}
+QPushButton#connectionProfile:disabled {
+    background: transparent;
+}
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QTextEdit:disabled {
+    color: $disabled_text;
+    background: $disabled_bg;
+    border-color: $border;
+}
+QMenu, QToolTip {
+    background: $raised;
+    color: $text;
+    border: 1px solid $control_border;
+    padding: 4px;
+}
+QMenu::item {
+    background: transparent;
+    padding: 6px 24px;
+}
+QMenu::item:selected { background: $selection; color: $text; }
+QMenu::item:disabled { color: $disabled_text; }
+QMenu::separator { height: 1px; background: $border; margin: 4px 6px; }
+QListWidget#autoConnectList::indicator { width: 14px; height: 14px; }
+QWidget#themeSelector { background: transparent; }
+QPushButton#themeOption {
+    background: $input;
+    color: $muted;
+    border: 1px solid $control_border;
+    padding: 5px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#themeOption:hover { background: $hover; color: $text; }
+QPushButton#themeOption:checked {
+    background: $primary;
+    color: $on_primary;
+    border-color: $primary;
+}
+QPushButton#themeOption:focus { border: 1px dotted $focus; }
+QPushButton#themeOption:checked:focus, QPushButton#protocolPill:checked:focus,
+QPushButton#primaryButton:focus, QPushButton#primaryButtonWide:focus,
+QPushButton#successButton:focus, QPushButton#addProfileButton:focus {
+    border: 1px dotted $on_primary;
+}
+"""
+
+
+def build_styles(name: str = "dark") -> str:
+    return Template(_APP_TEMPLATE + _CONNECTIONS_TEMPLATE + _EXTRA_TEMPLATE).substitute(theme_colors(name))
+
+
+# Compatibility for consumers that need a static default stylesheet.
+APP_STYLE = build_styles("dark")

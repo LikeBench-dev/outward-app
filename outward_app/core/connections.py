@@ -231,10 +231,12 @@ def sanitize_connection_error(message: str) -> str:
         r'("password"\s*:\s*")[^"]+(")',
         r'("private_key"\s*:\s*")[^"]+(")',
         r'("pre_shared_key"\s*:\s*")[^"]+(")',
+        r'("uuid"\s*:\s*")[^"]+(")',
         r"(PrivateKey\s*=\s*)\S+",
         r"(PresharedKey\s*=\s*)\S+",
     )
     for pattern in secret_patterns:
         sanitized = re.sub(pattern, lambda match: match.group(1) + "***" + (match.group(2) if match.lastindex and match.lastindex > 1 else ""), sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '***', sanitized, flags=re.IGNORECASE)
     return sanitized
 

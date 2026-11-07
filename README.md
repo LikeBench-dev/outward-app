@@ -21,6 +21,10 @@ Outward App - Windows-приложение с графическим интер�
 
 Если Chrome и Edge не найдены, приложение попробует открыть браузер по умолчанию, но proxy-настройки могут не примениться автоматически.
 
+### Системное подключение
+
+В верхней карточке можно выбрать TUN или «Системный прокси». Режим сохраняется и меняется после отключения. TUN использует службу Outward для Windows; системный прокси работает без неё и применяется к программам, учитывающим пользовательские настройки прокси Windows. При остановке приложение восстанавливает прежние настройки; отдельный помощник выполняет восстановление при сбое приложения. Независимые прокси-окна доступны в обоих режимах.
+
 ### Что использует приложение
 
 - Outward App - основное Windows-приложение.
@@ -37,6 +41,7 @@ Outward App - Windows-приложение с графическим интер�
 
 - profiles.json - сохраненные профили подключения.
 - settings.json - настройки приложения.
+- system-proxy.json - временная резервная копия настроек прокси Windows на время системной прокси-сессии; удаляется после восстановления.
 - config.json - последняя сгенерированная конфигурация sing-box.
 - sing-box.log - лог запуска и работы proxy-ядра.
 - chrome_proxy_profile_<port> - отдельные профили браузера для proxy-запуска.
@@ -101,9 +106,13 @@ Outward App - Windows-приложение с графическим интер�
 
 Обычный релизный поток:
 
-1. Для проверки изменений запустить `build-installer-check.bat`: он соберет установщик без изменения `VERSION`. Для релиза запустить `build-installer.bat`: он повысит patch-версию в `VERSION`.
-2. Закоммитить изменения и выполнить `git push`.
+1. Пополнить `release-notes.md` и запустить `.\build-installer.bat` без параметров. Скрипт повысит patch-версию в `VERSION`, соберет установщик и после успешной сборки создаст коммит `Release v<version>` со всеми изменениями, включая новые и удаленные файлы. Правила `.gitignore` сохраняются: сборки и локальные данные в коммит не попадут.
+2. Проверить коммит и выполнить `git push`. Скрипт сам не отправляет изменения.
 3. GitHub Actions увидит изменение `VERSION`, соберет установщик на Windows runner и опубликует GitHub Release `v<version>` с installer и `.sha256`.
+
+`build-installer.bat` — локальная обёртка, исключённая из Git. В чистом клоне используйте её PowerShell-эквивалент: `.\build-installer.ps1 -CommitRelease`. Прямой запуск PowerShell-скрипта без `-CommitRelease` собирает установщик без создания коммита. Для проверки без повышения версии используйте `build-installer-check.bat`. Чтобы выбрать номер релиза явно, запустите `.\build-installer.ps1 -Version 0.2.0 -CommitRelease`.
+
+Если сборка завершилась ошибкой, коммит не создается, но выбранный номер остается в `VERSION`. После исправления причины повторите `.\build-installer.ps1 -NoVersionBump -CommitRelease`, чтобы собрать и закоммитить тот же релиз. Версия коммита должна быть новее `HEAD:VERSION`; уже существующий локальный тег `v<version>` использовать нельзя.
 
 Ручная публикация все еще доступна через PowerShell, если установлен GitHub CLI и выполнен `gh auth login`:
 
@@ -135,6 +144,10 @@ The project is source-available under the [PolyForm Noncommercial License 1.0.0]
 6. When disconnected, the app stops the managed sing-box process.
 
 If Chrome and Edge are not found, the app tries to open the default browser, but proxy settings may not be applied automatically.
+
+### System Connection
+
+The pinned card offers TUN and System proxy modes. The choice is saved and can be changed while disconnected. TUN uses the Outward Windows service; System proxy runs without it and applies to applications that honor the user's Windows proxy settings. Disconnect restores the previous settings; an independent helper handles recovery if the app crashes. Independent proxy windows remain available in either mode.
 
 ### What The App Uses
 
@@ -216,9 +229,13 @@ After a successful build, the installer is created in installer-output\Outward A
 
 Normal release flow:
 
-1. To verify changes, run `build-installer-check.bat`: it builds the installer without changing `VERSION`. For a release, run `build-installer.bat`: it bumps the patch version in `VERSION`.
-2. Commit the changes and run `git push`.
+1. Update `release-notes.md` and run `.\build-installer.bat` without arguments. The script bumps the patch version in `VERSION`, builds the installer, then creates a `Release v<version>` commit after a successful build. It includes all changes, including new and deleted files, while respecting `.gitignore` for build output and local data.
+2. Review the commit and run `git push`. The script does not push changes.
 3. GitHub Actions sees the `VERSION` change, builds the installer on a Windows runner, and publishes GitHub Release `v<version>` with the installer and `.sha256`.
+
+`build-installer.bat` is a local wrapper excluded from Git. In a fresh clone, use its PowerShell equivalent: `.\build-installer.ps1 -CommitRelease`. Running the PowerShell script directly without `-CommitRelease` builds without creating a commit. Use `build-installer-check.bat` to check changes without bumping the version. To choose the release number explicitly, run `.\build-installer.ps1 -Version 0.2.0 -CommitRelease`.
+
+If the build fails, no commit is created, but the selected version remains in `VERSION`. After fixing the cause, retry with `.\build-installer.ps1 -NoVersionBump -CommitRelease` to build and commit the same release. The commit version must be newer than `HEAD:VERSION`; an existing local `v<version>` tag cannot be reused.
 
 Manual publishing is still available through PowerShell when GitHub CLI is installed and `gh auth login` has been completed:
 

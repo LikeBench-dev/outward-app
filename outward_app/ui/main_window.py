@@ -1,5 +1,4 @@
 from __future__ import annotations
-import ctypes
 from pathlib import Path
 import re
 import subprocess
@@ -7,7 +6,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from html import escape
 from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QIcon, QPainter, QPalette, QPen, QPixmap, QTextCursor
 from PySide6.QtNetwork import QTcpSocket
 from PySide6.QtWidgets import QApplication, QBoxLayout, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QTextEdit, QScrollArea, QSizePolicy, QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget
 from outward_app.app_info import APP_NAME
@@ -21,8 +20,13 @@ from outward_app.core.storage import JsonStore
 from outward_app.core.updater import UpdateCheckResult, UpdateManager, UpdateRelease
 from outward_app.paths import asset_path
 from outward_app.ui.dialogs import LaunchSitesDialog, ProfileDialog
-from outward_app.ui.widgets import CurrentPageStack, ElidedLabel, StatusCaption
+from outward_app.ui.country_flags import CountryFlagBadge
+from outward_app.ui.widgets import CurrentPageStack, ElidedLabel, MenuButton, SelectCombo, StatusCaption, ThemeSelector
+from outward_app.ui.themes import theme_color, theme_colors, theme_manager
+from outward_app.ui.connections import ConnectionsUi
+from outward_app.ui.window_chrome import ChromeMainWindow, DEFAULT_WINDOW_SIZE, MINIMUM_WINDOW_SIZE
 from outward_app.version import get_app_version
+from outward_app.ui.i18n import set_language, tr
 
 try:
     from qfluentwidgets import ComboBox as FluentComboBox
@@ -47,19 +51,19 @@ class SwitchControl(QCheckBox):
         track = QRectF(2, 2, 40, 20)
         if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor('#9B59FF'))
+            painter.setBrush(theme_color('primary'))
             painter.drawRoundedRect(track, 10, 10)
-            painter.setBrush(QColor('#ffffff'))
+            painter.setBrush(theme_color('on_primary'))
             painter.drawEllipse(QRectF(24, 4, 16, 16))
         else:
-            painter.setPen(QPen(QColor('#64748B'), 1))
+            painter.setPen(QPen(theme_color('control_border'), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(track, 10, 10)
-            painter.setPen(QPen(QColor('#94A3B8'), 2))
+            painter.setPen(QPen(theme_color('muted'), 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QRectF(9, 8, 8, 8))
         if self.hasFocus():
-            painter.setPen(QPen(QColor('#b98cff'), 1, Qt.PenStyle.DotLine))
+            painter.setPen(QPen(theme_color('focus'), 1, Qt.PenStyle.DotLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(QRectF(0.5, 0.5, 43, 23), 5, 5)
 
@@ -105,7 +109,7 @@ class LoadingButton(QPushButton):
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor('#ffffff') if self.objectName() == 'primaryButton' else QColor('#C4B5FD')
+        color = self.palette().color(QPalette.ColorRole.ButtonText)
         pen = QPen(color, 2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
@@ -114,95 +118,15 @@ class LoadingButton(QPushButton):
         self.setIcon(QIcon(pixmap))
         self._loading_angle = (self._loading_angle - 30) % 360
 
-class ConnectWorker(QObject):
-    connected = Signal(object)
-    failed = Signal(str)
-    message = Signal(str)
-    finished = Signal()
-
-    def __init__(self, profile: ConnectionProfile, settings: AppSettings, manager: SingBoxManager, store: JsonStore) -> None:
-        super().__init__()
-        self.profile = profile
-        self.settings = settings
-        self.manager = manager
-        self.store = store
-
-    def run(self) -> None:
-        try:
-            self.message.emit('Проверяем профиль подключения...')
-            connection = parse_connection(self.profile.link)
-            if self.manager.is_running():
-                self.message.emit('Останавливаем текущее подключение...')
-                self.manager.stop()
-            if self.settings.stop_existing_sing_box:
-                stopped_pids, errors = stop_managed_sing_box_processes()
-                if stopped_pids:
-                    self.message.emit(f"Остановлены старые сеансы: {', '.join(stopped_pids)}")
-                if errors:
-                    raise RuntimeError('\n'.join(errors))
-            http_port, socks_port = choose_proxy_ports(self.settings.http_port, self.settings.socks_port)
-            if (http_port, socks_port) != (self.settings.http_port, self.settings.socks_port):
-                port_message = (
-                    f'Настроенные порты {self.settings.http_port}/{self.settings.socks_port} недоступны. '
-                    f'Используем ближайшие свободные: HTTP {http_port}, SOCKS5 {socks_port}.'
-                )
-                self.message.emit(port_message)
-                append_log_entry(port_message, 'INFO')
-            else:
-                self.message.emit(f'HTTP {http_port}, SOCKS5 {socks_port} готовы к запуску.')
-            config = build_sing_box_config(connection, http_port, socks_port, self.settings.custom_dns)
-            write_config(config)
-            sing_box = find_sing_box()
-            self.message.emit('Проверяем конфигурацию sing-box...')
-            self.manager.check_config(sing_box)
-            self.message.emit('Запускаем sing-box...')
-            self.manager.start(sing_box)
-            self.manager.wait_for_ports([http_port, socks_port])
-            http_proxy_url = f'http://127.0.0.1:{http_port}'
-            socks_proxy_url = f'socks5://127.0.0.1:{socks_port}'
-            state = RuntimeState(profile_id=self.profile.id, profile_name=self.profile.name, http_port=http_port, socks_port=socks_port, http_proxy_url=http_proxy_url, socks_proxy_url=socks_proxy_url, server=connection.server, server_port=connection.port, protocol=connection.protocol, protocol_label=connection.protocol_label)
-            self.store.mark_used(self.profile.id)
-            if self.settings.auto_open_browser:
-                opened_with_proxy = open_url_with_proxy(
-                    socks_port,
-                    self.settings.preferred_browser,
-                    self.settings.launch_url,
-                    self.settings.disable_browser_extensions,
-                )
-                if opened_with_proxy:
-                    self.message.emit('Браузер открыт через proxy-профиль.')
-                else:
-                    self.message.emit('Открыт браузер по умолчанию. Proxy-настройки могут потребовать проверки.')
-            self.connected.emit(state)
-        except Exception as exc:
-            self.failed.emit(sanitize_connection_error(str(exc)))
-        finally:
-            self.finished.emit()
 
 
-class DisconnectWorker(QObject):
-    failed = Signal(str)
-    finished = Signal()
 
-    def __init__(self, manager: SingBoxManager) -> None:
-        super().__init__()
-        self.manager = manager
-
-    def run(self) -> None:
-        try:
-            self.manager.stop()
-        except Exception as exc:
-            self.failed.emit(str(exc))
-        finally:
-            self.finished.emit()
-
-class UpdateCheckWorker(QObject):
+class UpdateCheckWorker(QThread):
     checked = Signal(object)
     failed = Signal(str)
-    finished = Signal()
 
-    def __init__(self, manager: UpdateManager) -> None:
-        super().__init__()
+    def __init__(self, manager: UpdateManager, parent=None) -> None:
+        super().__init__(parent)
         self.manager = manager
 
     def run(self) -> None:
@@ -210,17 +134,14 @@ class UpdateCheckWorker(QObject):
             self.checked.emit(self.manager.check_for_update())
         except Exception as exc:
             self.failed.emit(str(exc))
-        finally:
-            self.finished.emit()
 
-class UpdateDownloadWorker(QObject):
+class UpdateDownloadWorker(QThread):
     progress = Signal(int, int)
     downloaded = Signal(object)
     failed = Signal(str)
-    finished = Signal()
 
-    def __init__(self, manager: UpdateManager, release: UpdateRelease) -> None:
-        super().__init__()
+    def __init__(self, manager: UpdateManager, release: UpdateRelease, parent=None) -> None:
+        super().__init__(parent)
         self.manager = manager
         self.release = release
 
@@ -230,35 +151,33 @@ class UpdateDownloadWorker(QObject):
             self.downloaded.emit(path)
         except Exception as exc:
             self.failed.emit(str(exc))
-        finally:
-            self.finished.emit()
 
-class MainWindow(QMainWindow):
+class MainWindow(ConnectionsUi, ChromeMainWindow):
 
-    def __init__(self) -> None:
+    def __init__(self, *, launched_on_startup: bool = False) -> None:
+        store = JsonStore()
+        settings = store.load_settings()
+        set_language(settings.language)
         super().__init__()
-        self.setWindowTitle(f'{APP_NAME} - Настройки')
-        self.setMinimumSize(900, 560)
-        self.store = JsonStore()
-        self.settings = self.store.load_settings()
-        self.manager = SingBoxManager()
-        self.profiles: list[ConnectionProfile] = []
-        self.runtime_state: RuntimeState | None = None
-        self.connect_thread: QThread | None = None
-        self.connect_worker: ConnectWorker | None = None
-        self.disconnect_thread: QThread | None = None
-        self.disconnect_worker: DisconnectWorker | None = None
-        self.disconnect_error: str | None = None
-        self.ping_socket: QTcpSocket | None = None
-        self.ping_started_at = 0.0
-        self.update_check_thread: QThread | None = None
-        self.update_check_worker: UpdateCheckWorker | None = None
-        self.update_download_thread: QThread | None = None
-        self.update_download_worker: UpdateDownloadWorker | None = None
+        self._launched_on_startup = launched_on_startup
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(*MINIMUM_WINDOW_SIZE)
+        self.resize(*DEFAULT_WINDOW_SIZE)
+        self.store = store
+        self.settings = settings
+        theme_manager().apply(self.settings.theme)
+        self.profiles = self.store.load_profiles()
+        self._init_connections()
+        self.connect_thread = None
+        self.disconnect_thread = None
+        self.update_check_thread = None
+        self.update_check_worker = None
+        self.update_download_thread = None
+        self.update_download_worker = None
         self.update_manager = UpdateManager(get_app_version())
-        self.available_update: UpdateRelease | None = None
-        self.downloaded_update_installer: Path | None = None
-        self.tray_icon: QSystemTrayIcon | None = None
+        self.available_update = None
+        self.downloaded_update_installer = None
+        self.tray_icon = None
         self.force_quit = False
         self.dark_title_applied = False
         self._last_log_text = ''
@@ -266,25 +185,20 @@ class MainWindow(QMainWindow):
         self._create_tray_icon()
         self._load_profiles()
         self._load_settings_to_ui()
-        self._set_connected(False)
+        theme_manager().theme_changed.connect(self._on_theme_changed)
+        self._sync_windows_startup()
         self.log_timer = QTimer(self)
         self.log_timer.setInterval(1500)
         self.log_timer.timeout.connect(self.refresh_log)
         self.log_timer.start()
         self.session_timer = QTimer(self)
         self.session_timer.setInterval(1000)
-        self.session_timer.timeout.connect(self._update_session_time)
+        self.session_timer.timeout.connect(self.dashboard.tick)
         self.session_timer.start()
-        self.ping_timer = QTimer(self)
-        self.ping_timer.setInterval(10000)
-        self.ping_timer.timeout.connect(self._request_ping_update)
-        self.ping_timeout_timer = QTimer(self)
-        self.ping_timeout_timer.setSingleShot(True)
-        self.ping_timeout_timer.setInterval(2500)
-        self.ping_timeout_timer.timeout.connect(self._on_ping_timeout)
         self.refresh_log()
         QTimer.singleShot(1200, self._check_updates_on_startup)
         QTimer.singleShot(1700, self._connect_on_startup)
+
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -322,7 +236,7 @@ class MainWindow(QMainWindow):
         brand_row.addLayout(brand_text, 1)
         side_layout.addLayout(brand_row)
 
-        profile_title = QLabel('ПРОФИЛИ ПОДКЛЮЧЕНИЯ')
+        profile_title = QLabel(tr('ПРОФИЛИ ПОДКЛЮЧЕНИЯ'))
         profile_title.setObjectName('sectionTitle')
         side_layout.addWidget(profile_title)
 
@@ -330,13 +244,13 @@ class MainWindow(QMainWindow):
         self.empty_profiles.setObjectName('emptyProfiles')
         empty_layout = QVBoxLayout(self.empty_profiles)
         empty_layout.setContentsMargins(4, 12, 4, 0)
-        empty_title = QLabel('Пока нет профилей')
+        empty_title = QLabel(tr('Пока нет профилей'))
         empty_title.setObjectName('settingLabel')
         empty_title.setWordWrap(True)
-        empty_hint = QLabel('Добавьте ссылку подключения, чтобы начать.')
+        empty_hint = QLabel(tr('Добавьте ссылку подключения, чтобы начать.'))
         empty_hint.setObjectName('mutedLabel')
         empty_hint.setWordWrap(True)
-        empty_add = QPushButton('Добавить профиль')
+        empty_add = QPushButton(tr('Добавить профиль'))
         empty_add.setObjectName('primaryButton')
         empty_add.clicked.connect(self.add_profile)
         empty_layout.addWidget(empty_title)
@@ -346,24 +260,33 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(self.empty_profiles, 1)
 
         self.profile_list = QListWidget()
-        self.profile_list.setAccessibleName('Профили подключения')
+        self.profile_list.setAccessibleName(tr('Профили подключения'))
         self.profile_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.profile_list.customContextMenuRequested.connect(self._show_profile_context_menu)
         self.profile_list.currentItemChanged.connect(self._sync_profile_buttons)
         self.profile_list.itemDoubleClicked.connect(lambda _item: self.connect_profile())
         side_layout.addWidget(self.profile_list, 1)
 
-        self.edit_button = QPushButton('Изменить', sidebar)
-        self.delete_button = QPushButton('Удалить', sidebar)
+        self.edit_button = QPushButton(tr('Изменить'), sidebar)
+        self.delete_button = QPushButton(tr('Удалить'), sidebar)
         self.edit_button.hide()
         self.delete_button.hide()
         self.edit_button.clicked.connect(self.edit_profile)
         self.delete_button.clicked.connect(self.delete_profile)
 
-        self.add_button = QPushButton('+  Новый профиль')
+        self.add_button = QPushButton(tr('+  Новый профиль'))
         self.add_button.setObjectName('sideAddButton')
         self.add_button.clicked.connect(self.add_profile)
-        side_layout.addWidget(self.add_button)
+        bottom_actions = QVBoxLayout()
+        bottom_actions.setSpacing(8)
+        bottom_actions.addWidget(self.add_button)
+        self.settings_button = QPushButton(tr('Настройки'))
+        self.settings_button.setObjectName('sideSettingsButton')
+        self.settings_button.setCheckable(True)
+        self.settings_button.setAccessibleName(tr('Настройки приложения'))
+        self.settings_button.clicked.connect(lambda: self._set_route('home' if self._route == 'settings' else 'settings'))
+        bottom_actions.addWidget(self.settings_button)
+        side_layout.addLayout(bottom_actions)
         root.addWidget(sidebar)
 
         scroll = QScrollArea()
@@ -372,7 +295,7 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         root.addWidget(scroll, 1)
 
         body = QWidget()
@@ -382,137 +305,47 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(18)
         scroll.setWidget(body)
 
-        status_panel = QFrame()
-        status_panel.setObjectName('statusPanel')
-        status_layout = QGridLayout(status_panel)
-        self.status_layout = status_layout
-        status_layout.setContentsMargins(16, 14, 16, 14)
-        status_layout.setHorizontalSpacing(14)
-        status_layout.setVerticalSpacing(4)
-
-        self.hero_logo = QLabel()
-        self.hero_logo.setObjectName('heroLogo')
-        if not pixmap.isNull():
-            self.hero_logo.setPixmap(pixmap.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        self.hero_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hero_logo.setFixedSize(48, 48)
-        status_layout.addWidget(self.hero_logo, 0, 0, 2, 1)
-
-        status_title_row = QHBoxLayout()
-        status_title_row.setSpacing(7)
-        self.status_dot = QLabel('●')
-        self.status_dot.setObjectName('statusDot')
-        self.status_title_label = QLabel('Подключение остановлено')
-        self.status_title_label.setObjectName('statusTitle')
-        self.status_title_label.setWordWrap(True)
-        status_title_row.addWidget(self.status_dot)
-        status_title_row.addWidget(self.status_title_label, 1)
-        status_layout.addLayout(status_title_row, 0, 1)
-
-        stats_row = QHBoxLayout()
-        stats_row.setSpacing(22)
-        self.status_caption_label = StatusCaption('')
-        self.status_caption_label.setObjectName('mutedLabel')
-        self.status_caption_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.status_caption_label.setWordWrap(True)
-        self.status_caption_label.hide()
-        status_layout.addWidget(self.status_caption_label, 2, 1, 1, 2)
-        self.status_profile_value = self._make_status_metric(stats_row, 'Профиль:', '-')
-        self.session_value = self._make_status_metric(stats_row, 'Сессия:', '00:00:00')
-        self.latency_value = self._make_status_metric(stats_row, 'Ping:', '-')
-        stats_row.addStretch(1)
-        status_layout.addLayout(stats_row, 1, 1)
-
-        self.status_actions = QFrame()
-        self.status_actions.setObjectName('statusActions')
-        status_actions = QHBoxLayout(self.status_actions)
-        status_actions.setContentsMargins(0, 0, 0, 0)
-        status_actions.setSpacing(10)
-        self.connect_button = LoadingButton('Подключить')
-        self.connect_button.setObjectName('primaryButton')
-        self.connect_button.setFixedWidth(156)
-        self.disconnect_button = LoadingButton('Отключить')
-        self.disconnect_button.setFixedWidth(150)
-        self.disconnect_button.setObjectName('ghostButton')
-        self.connect_button.clicked.connect(self.connect_profile)
-        self.disconnect_button.clicked.connect(self.disconnect_profile)
-        status_actions.addWidget(self.connect_button)
-        status_actions.addWidget(self.disconnect_button)
-        status_layout.addWidget(self.status_actions, 0, 2, 2, 1)
-        status_layout.setColumnStretch(1, 1)
-        body_layout.addWidget(status_panel)
-
-        self.connection_tools = QFrame()
-        self.connection_tools.setObjectName('connectionTools')
-        connection_layout = QVBoxLayout(self.connection_tools)
-        connection_layout.setContentsMargins(0, 0, 0, 0)
-        connection_layout.setSpacing(14)
-
-        metrics_row = QHBoxLayout()
-        metrics_row.setSpacing(14)
-        http_card, self.http_port_label = self._metric_card('HTTP прокси порт', '-')
-        socks_card, self.socks_port_label = self._metric_card('SOCKS5 прокси порт', '-')
-        protocol_card, self.protocol_label = self._metric_card('Протокол туннелирования', 'VLESS')
-        metrics_row.addWidget(http_card)
-        metrics_row.addWidget(socks_card)
-        metrics_row.addWidget(protocol_card)
-        connection_layout.addLayout(metrics_row)
-
-        launch_row = QHBoxLayout()
-        launch_row.setSpacing(12)
-        self.open_browser_button = QPushButton('Открыть браузер')
-        self.open_browser_button.setObjectName('primaryButton')
-        self.open_browser_button.clicked.connect(self.open_browser)
-        self.open_browser_button.setFixedWidth(148)
-        launch_target = QFrame()
-        launch_target.setObjectName('launchTarget')
-        launch_target_layout = QHBoxLayout(launch_target)
-        launch_target_layout.setContentsMargins(12, 0, 10, 0)
-        launch_target_layout.setSpacing(8)
-        self.launch_favicon = QLabel()
-        self.launch_favicon.setObjectName('launchFavicon')
-        self.launch_favicon.setFixedSize(18, 18)
-        self.launch_url_combo = self._make_combo_box()
-        self.launch_url_combo.setObjectName('launchCombo')
-        self.launch_url_combo.setMinimumWidth(0)
-        self.launch_url_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        set_launch_editable = getattr(self.launch_url_combo, 'setEditable', None)
-        if set_launch_editable is not None:
-            set_launch_editable(False)
-        self.launch_url_combo.currentTextChanged.connect(self._remember_launch_url)
-        launch_hint = QLabel('Открыть после запуска')
-        self.launch_hint = launch_hint
-        launch_hint.setObjectName('launchHint')
-        launch_target_layout.addWidget(self.launch_favicon)
-        launch_target_layout.addWidget(self.launch_url_combo, 1)
-        launch_target_layout.addWidget(launch_hint)
+        self.routes = CurrentPageStack()
+        self.routes.setObjectName('appRoutes')
+        body_layout.addWidget(self.routes, 1)
+        self.home_page = self._build_connections()
+        self.routes.addWidget(self.home_page)
+        self.settings_page = QWidget()
+        self.settings_page.setObjectName('settingsRoute')
+        self.routes.addWidget(self.settings_page)
+        settings_layout = QVBoxLayout(self.settings_page)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(14)
+        heading = QHBoxLayout()
+        title = QLabel(tr('Настройки'))
+        title.setObjectName('statusTitle')
+        heading.addWidget(title)
+        heading.addStretch(1)
+        self.home_button = QPushButton(tr('На главную'))
+        self.home_button.setObjectName('ghostButton')
+        self.home_button.clicked.connect(lambda: self._set_route('home'))
+        heading.addWidget(self.home_button)
+        settings_layout.addLayout(heading)
+        self.launch_url_combo = QComboBox(body)
+        self.launch_url_combo.hide()
         self.launch_auto_open_check = self._make_switch()
-        self.launch_auto_open_check.setAccessibleName('Запускать браузер после подключения')
+        self.launch_auto_open_check.setParent(body)
         self.launch_auto_open_check.hide()
-        self._connect_switch(self.launch_auto_open_check, self._remember_auto_open_from_launch)
-        self.launch_sites_button = QPushButton('+')
-        self.launch_sites_button.setObjectName('launchManageButton')
-        self.launch_sites_button.setFixedSize(34, 34)
-        self.launch_sites_button.setToolTip('Управление ресурсами запуска')
-        self.launch_sites_button.setAccessibleName('Управление ресурсами запуска')
-        self.launch_sites_button.clicked.connect(self.manage_launch_sites)
-        launch_row.addWidget(self.open_browser_button, 0)
-        launch_row.addWidget(launch_target, 1)
-        launch_row.addWidget(self.launch_sites_button, 0)
-        connection_layout.addLayout(launch_row)
+        self.launch_favicon = QLabel(body)
+        self.launch_favicon.hide()
 
         pivot = QFrame()
         pivot.setObjectName('pivotTabs')
         pivot_layout = QHBoxLayout(pivot)
         pivot_layout.setContentsMargins(0, 0, 0, 0)
         pivot_layout.setSpacing(18)
-        self.log_tab_button = QPushButton('Лог консоли')
+        self.log_tab_button = QPushButton(tr('Лог консоли'))
         self.log_tab_button.setObjectName('pivotTab')
         self.log_tab_button.setCheckable(True)
-        self.settings_tab_button = QPushButton('Настройки клиента')
+        self.settings_tab_button = QPushButton(tr('Настройки клиента'))
         self.settings_tab_button.setObjectName('pivotTab')
         self.settings_tab_button.setCheckable(True)
-        self.update_tab_button = QPushButton('Обновление')
+        self.update_tab_button = QPushButton(tr('Обновление'))
         self.update_tab_button.setObjectName('pivotTab')
         self.update_tab_button.setCheckable(True)
         self.log_tab_button.clicked.connect(lambda: self._set_tab_index(0))
@@ -522,7 +355,7 @@ class MainWindow(QMainWindow):
         pivot_layout.addWidget(self.settings_tab_button)
         pivot_layout.addWidget(self.update_tab_button)
         pivot_layout.addStretch(1)
-        body_layout.addWidget(pivot)
+        settings_layout.addWidget(pivot)
 
         self.tabs = CurrentPageStack()
         self.tabs.setObjectName('contentStack')
@@ -531,25 +364,45 @@ class MainWindow(QMainWindow):
         log_tab_layout = QVBoxLayout(self.log_tab_page)
         log_tab_layout.setContentsMargins(0, 4, 0, 0)
         log_tab_layout.setSpacing(14)
-        log_tab_layout.addWidget(self.connection_tools)
+        log_source = QHBoxLayout()
+        log_label = QLabel(tr('Подключение'))
+        self.log_connection_combo = self._make_combo_box()
+        self.log_connection_combo.setAccessibleName(tr('Подключение для журнала'))
+        self.log_connection_combo.setMinimumWidth(0)
+        self.log_connection_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        log_label.setBuddy(self.log_connection_combo)
+        log_source.addWidget(log_label)
+        log_source.addWidget(self.log_connection_combo, 1)
+        self.log_connection_combo.currentIndexChanged.connect(self._log_connection_selected)
+        log_tab_layout.addLayout(log_source)
         self.log_view = QTextEdit()
         self.log_view.setObjectName('logConsole')
         self.log_view.setReadOnly(True)
-        self.log_view.setMinimumHeight(240)
-        self.log_view.setPlaceholderText('Лог sing-box появится здесь после запуска.')
+        self.log_view.setMinimumHeight(100)
+        self.log_view.setPlaceholderText(tr('Лог sing-box появится здесь после запуска.'))
         log_tab_layout.addWidget(self.log_view, 1)
         self.tabs.addWidget(self.log_tab_page)
         self.tabs.addWidget(self._build_settings_tab())
         self.tabs.addWidget(self._build_update_tab())
-        body_layout.addWidget(self.tabs, 1)
+        self.legacy_scroll = QScrollArea()
+        self.legacy_scroll.setObjectName('legacyToolsScroll')
+        self.legacy_scroll.setWidgetResizable(True)
+        self.legacy_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.legacy_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.legacy_scroll.setMinimumHeight(100)
+        self.legacy_scroll.setWidget(self.tabs)
+        settings_layout.addWidget(self.legacy_scroll, 1)
+        self._refresh_log_connections()
 
         self.footer_label = QLabel(f'{APP_NAME} v{get_app_version()} · Windows 11 x64')
         self.footer_label.setObjectName('footerLabel')
         body_layout.addWidget(self.footer_label)
         self._set_tab_index(1)
+        self._set_route('home')
         self._compact_layout = None
         scroll.viewport().installEventFilter(self)
         self._update_responsive_layout(scroll.viewport().width())
+
 
     def eventFilter(self, watched, event) -> bool:
         if (hasattr(self, '_compact_layout') and watched is self.content_scroll.viewport()
@@ -565,12 +418,8 @@ class MainWindow(QMainWindow):
         self.settings_cards.setDirection(QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight)
         for index in range(2):
             self.settings_cards.setStretch(index, 0 if compact else 1)
-        if compact:
-            self.status_layout.addWidget(self.status_actions, 3, 1, 1, 2, Qt.AlignmentFlag.AlignRight)
-        else:
-            self.status_layout.addWidget(self.status_actions, 0, 2, 2, 1)
-        self.launch_hint.setVisible(not compact)
         self.tabs.updateGeometry()
+
 
     def _make_switch(self) -> QWidget:
         return SwitchControl()
@@ -603,14 +452,43 @@ class MainWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
 
+    def _set_route(self, route: str) -> None:
+        if route not in {'home', 'settings'}:
+            raise ValueError(tr('Неизвестная страница'))
+        self._route = route
+        self.routes.setCurrentIndex(0 if route == 'home' else 1)
+        self.settings_button.setChecked(route == 'settings')
+        self.settings_button.setProperty('selected', 'true' if route == 'settings' else 'false')
+        self.settings_button.style().unpolish(self.settings_button)
+        self.settings_button.style().polish(self.settings_button)
+        self.content_scroll.verticalScrollBar().setValue(0)
+        if route == 'settings':
+            self._refresh_log_connections()
+            self._refresh_auto_connect_list()
+        self.routes.updateGeometry()
+
+    def _refresh_log_connections(self):
+        self.log_connection_combo.blockSignals(True)
+        self.log_connection_combo.clear()
+        views = self.controller.views()
+        for view in views:
+            profile = self.controller.profiles.get(view.connection.profile_id)
+            name = tr('Системное подключение') if view.connection.kind == 'system' else tr('Окно №{0}', view.connection.number)
+            self.log_connection_combo.addItem(name + (f' — {profile.name}' if profile else ''), userData=view.connection.id)
+        index = self.log_connection_combo.findData(self._log_connection)
+        self.log_connection_combo.setCurrentIndex(max(index, 0))
+        self._log_connection = str(self.log_connection_combo.currentData())
+        self.log_connection_combo.blockSignals(False)
+
+    def _log_connection_selected(self, _index):
+        self._log_connection = str(self.log_connection_combo.currentData())
+        self.refresh_log()
+
     def _sync_connection_controls_visibility(self, *_args) -> None:
         return
 
     def _set_launch_favicon(self, text: str) -> None:
-        colors = {
-            'example.com': '#5865f2',
-        }
-        color = colors.get(text.strip().lower(), '#5865f2')
+        color = theme_colors()['accent']
         self.launch_favicon.setStyleSheet(f'background: {color}; border-radius: 9px;')
 
     def _launch_sites(self) -> list[str]:
@@ -659,9 +537,9 @@ class MainWindow(QMainWindow):
         box.setSpacing(4)
         title_label = QLabel(title)
         title_label.setObjectName('metricTitle')
-        value_label = ElidedLabel(value) if title == 'Профиль:' else QLabel(value)
+        value_label = ElidedLabel(value) if title == tr('Профиль:') else QLabel(value)
         value_label.setObjectName('statusMetricValue')
-        if title == 'Профиль:':
+        if title == tr('Профиль:'):
             value_label.setMinimumWidth(90)
             value_label.setMaximumWidth(140)
         box.addWidget(title_label)
@@ -702,33 +580,55 @@ class MainWindow(QMainWindow):
         general_layout.setHorizontalSpacing(18)
         general_layout.setVerticalSpacing(12)
         general_layout.setColumnStretch(0, 1)
-        heading = QLabel('Общие настройки')
+        heading = QLabel(tr('Общие настройки'))
         heading.setObjectName('settingsHeading')
         general_layout.addWidget(heading, 0, 0, 1, 2)
 
+        self.theme_selector = ThemeSelector()
+        self.theme_selector.theme_selected.connect(self._remember_theme)
         self.browser_combo = self._make_combo_box()
         self.browser_combo.setFixedWidth(110)
-        self.browser_combo.addItem('Авто', 'auto')
+        self.browser_combo.addItem(tr('Авто'), 'auto')
         self.browser_combo.addItem('Chrome', 'chrome')
         self.browser_combo.addItem('Edge', 'edge')
         self.auto_open_check = self._make_switch()
         self._connect_switch(self.auto_open_check, self._remember_auto_open_from_settings)
-        self.auto_connect_on_startup_check = self._make_switch()
-        self._connect_switch(self.auto_connect_on_startup_check, self._remember_auto_connect_on_startup)
+        self.launch_on_startup_check = self._make_switch()
+        self._connect_switch(self.launch_on_startup_check, self._remember_launch_on_startup)
         self.disable_extensions_check = self._make_switch()
         self.stop_existing_check = self._make_switch()
         self.minimize_to_tray_check = self._make_switch()
-        self.language_combo = self._make_combo_box()
-        self.language_combo.setFixedWidth(110)
+        self.language_combo = SelectCombo()
+        self.language_combo.setObjectName('languageCombo')
+        self.language_combo.setFixedWidth(132)
         self.language_combo.addItem('Русский', 'ru')
         self.language_combo.addItem('English', 'en')
+        self.language_combo.currentIndexChanged.connect(self._remember_language)
 
-        self._add_setting_row(general_layout, 1, 'Браузер', 'Выберите браузер для запуска\nчерез прокси', self.browser_combo)
-        self._add_setting_row(general_layout, 2, 'Запускать браузер после подключения', 'Открывать браузер сразу после подключения', self.auto_open_check)
-        self._add_setting_row(general_layout, 3, 'Автоподключение при запуске', 'Запускать приложение вместе с Windows и подключаться', self.auto_connect_on_startup_check)
-        self._add_setting_row(general_layout, 4, 'Отключать расширения браузера', 'Запускать Chrome/Edge без расширений', self.disable_extensions_check)
-        self._add_setting_row(general_layout, 5, 'Сворачивать в трей', 'Закрывать окно в системную панель', self.minimize_to_tray_check)
-        self._add_setting_row(general_layout, 6, 'Язык интерфейса', 'Смена локализации приложения', self.language_combo)
+        self._add_setting_row(general_layout, 1, tr('Тема интерфейса'), tr('Применяется сразу и сохраняется автоматически'), self.theme_selector)
+        self._add_setting_row(general_layout, 2, tr('Язык интерфейса'), tr('Сохраняется сразу. Применится после перезапуска.'), self.language_combo)
+        self._add_setting_row(general_layout, 3, tr('Браузер'), tr('Выберите браузер для запуска\nчерез прокси'), self.browser_combo)
+        self._add_setting_row(general_layout, 4, tr('Запускать браузер после подключения'), tr('Открывать браузер сразу после подключения'), self.auto_open_check)
+        self._add_setting_row(general_layout, 5, tr('Автозапуск'), tr('Запускать приложение при входе в Windows'), self.launch_on_startup_check)
+        self.auto_connect_settings = QWidget()
+        self.auto_connect_settings.setObjectName('autoConnectSettings')
+        auto_connect_layout = QVBoxLayout(self.auto_connect_settings)
+        auto_connect_layout.setContentsMargins(0, 0, 0, 0)
+        auto_connect_layout.setSpacing(8)
+        auto_connect_layout.addLayout(self._field_caption(tr('Автоподключение'), tr('Выберите подключения для автозапуска с Windows')))
+        self.auto_connect_list = QListWidget()
+        self.auto_connect_list.setObjectName('autoConnectList')
+        self.auto_connect_list.setAccessibleName(tr('Автоподключение'))
+        self.auto_connect_list.setAccessibleDescription(tr('Отметьте подключения для автоматического запуска с Windows. Пробел меняет выбор.'))
+        self.auto_connect_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.auto_connect_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.auto_connect_list.itemChanged.connect(self._remember_auto_connect_selection)
+        auto_connect_layout.addWidget(self.auto_connect_list)
+        general_layout.addWidget(self.auto_connect_settings, 6, 0, 1, 2)
+        self.auto_connect_settings.hide()
+        self._refresh_auto_connect_list()
+        self._add_setting_row(general_layout, 7, tr('Отключать расширения браузера'), tr('Запускать Chrome/Edge без расширений'), self.disable_extensions_check)
+        self._add_setting_row(general_layout, 8, tr('Сворачивать в трей'), tr('Закрывать окно в системную панель'), self.minimize_to_tray_check)
         cards.addWidget(general, 1)
 
         proxy = QFrame()
@@ -740,34 +640,34 @@ class MainWindow(QMainWindow):
         proxy_layout.setVerticalSpacing(10)
         proxy_layout.setColumnStretch(0, 1)
         proxy_layout.setColumnStretch(1, 1)
-        proxy_heading = QLabel('Сетевой прокси-сервер')
+        proxy_heading = QLabel(tr('Сетевой прокси-сервер'))
         proxy_heading.setObjectName('settingsHeadingAccent')
         proxy_layout.addWidget(proxy_heading, 0, 0, 1, 2)
 
         self.http_port_spin = QSpinBox()
         self.http_port_spin.setRange(1024, 65535)
         self.http_port_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.http_port_spin.setAccessibleName('HTTP порт')
+        self.http_port_spin.setAccessibleName(tr('HTTP порт'))
         self.socks_port_spin = QSpinBox()
         self.socks_port_spin.setRange(1024, 65535)
         self.socks_port_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.socks_port_spin.setAccessibleName('SOCKS5 порт')
+        self.socks_port_spin.setAccessibleName(tr('SOCKS5 порт'))
         self.dns_edit = QLineEdit()
         self.dns_edit.setPlaceholderText('1.1.1.1, 8.8.8.8')
 
-        proxy_layout.addLayout(self._field_caption('HTTP Port', 'Порт локального HTTP сервера'), 1, 0)
-        proxy_layout.addLayout(self._field_caption('SOCKS5 Port', 'Порт локального SOCKS5 сервера'), 1, 1)
+        proxy_layout.addLayout(self._field_caption('HTTP Port', tr('Порт локального HTTP сервера')), 1, 0)
+        proxy_layout.addLayout(self._field_caption('SOCKS5 Port', tr('Порт локального SOCKS5 сервера')), 1, 1)
         proxy_layout.addWidget(self.http_port_spin, 2, 0)
         proxy_layout.addWidget(self.socks_port_spin, 2, 1)
-        proxy_layout.addLayout(self._field_caption('Пользовательский DNS', 'DNS-серверы через запятую'), 3, 0, 1, 2)
+        proxy_layout.addLayout(self._field_caption(tr('Пользовательский DNS'), tr('DNS-серверы через запятую')), 3, 0, 1, 2)
         proxy_layout.addWidget(self.dns_edit, 4, 0, 1, 2)
-        self._add_setting_row(proxy_layout, 5, 'Останавливать старые сеансы', 'Закрывать только сеансы, запущенные Outward App', self.stop_existing_check)
+        self._add_setting_row(proxy_layout, 5, tr('Останавливать старые сеансы'), tr('Закрывать только сеансы, запущенные Outward App'), self.stop_existing_check)
         proxy_layout.setRowStretch(6, 1)
         cards.addWidget(proxy, 1)
         layout.addLayout(cards)
 
         layout.addStretch(1)
-        save_button = QPushButton('Сохранить настройки')
+        save_button = QPushButton(tr('Сохранить настройки'))
         save_button.setObjectName('primaryButton')
         save_button.setFixedHeight(36)
         save_button.clicked.connect(self.save_settings)
@@ -788,21 +688,21 @@ class MainWindow(QMainWindow):
         update_layout.setSpacing(12)
         update_copy = QVBoxLayout()
         update_copy.setSpacing(2)
-        update_title = QLabel('Обновление системы')
+        update_title = QLabel(tr('Обновление системы'))
         update_title.setObjectName('settingLabel')
-        self.update_status_label = QLabel(f'Текущая версия {APP_NAME}: {get_app_version()}. Проверка обновлений будет выполнена при запуске.')
+        self.update_status_label = QLabel(tr('Текущая версия {0}: {1}. Проверка обновлений будет выполнена при запуске.', APP_NAME, get_app_version()))
         self.update_status_label.setObjectName('mutedLabel')
         self.update_status_label.setWordWrap(True)
         update_copy.addWidget(update_title)
         update_copy.addWidget(self.update_status_label)
         self.auto_update_check = self._make_switch()
-        self.auto_update_check.setAccessibleName('Автоматическое обновление приложения')
+        self.auto_update_check.setAccessibleName(tr('Автоматическое обновление приложения'))
         self._connect_switch(self.auto_update_check, self._remember_auto_update)
         auto_update_row = QVBoxLayout()
         auto_update_row.setSpacing(2)
-        auto_update_title = QLabel('Автоматическое обновление приложения')
+        auto_update_title = QLabel(tr('Автоматическое обновление приложения'))
         auto_update_title.setObjectName('settingLabel')
-        auto_update_hint = QLabel('Скачивать новую версию в фоне после проверки')
+        auto_update_hint = QLabel(tr('Скачивать новую версию в фоне после проверки'))
         auto_update_hint.setObjectName('mutedLabel')
         auto_update_hint.setWordWrap(True)
         auto_update_row.addWidget(auto_update_title)
@@ -811,10 +711,10 @@ class MainWindow(QMainWindow):
         auto_update_setting.setSpacing(12)
         auto_update_setting.addLayout(auto_update_row, 1)
         auto_update_setting.addWidget(self.auto_update_check, 0, Qt.AlignTop)
-        self.update_button = QPushButton('Проверить обновления')
+        self.update_button = QPushButton(tr('Проверить обновления'))
         self.update_button.setObjectName('outlineButton')
         self.update_button.clicked.connect(lambda: self.check_for_updates(silent=False))
-        self.update_restart_button = QPushButton('Перезапустить и обновить')
+        self.update_restart_button = QPushButton(tr('Перезапустить и обновить'))
         self.update_restart_button.setObjectName('successButton')
         self.update_restart_button.hide()
         self.update_restart_button.clicked.connect(self.install_downloaded_update)
@@ -866,8 +766,8 @@ class MainWindow(QMainWindow):
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip(APP_NAME)
         menu = QMenu(self)
-        show_action = QAction(f'Показать {APP_NAME}', self)
-        quit_action = QAction('Выход', self)
+        show_action = QAction(tr('Показать {0}', APP_NAME), self)
+        quit_action = QAction(tr('Выход'), self)
         show_action.triggered.connect(self._restore_from_tray)
         quit_action.triggered.connect(self._quit_from_tray)
         menu.addAction(show_action)
@@ -877,6 +777,8 @@ class MainWindow(QMainWindow):
         self.tray_icon.show()
 
     def _load_settings_to_ui(self) -> None:
+        self._loading_settings = True
+        self.theme_selector.set_theme(self.settings.theme)
         index = self.browser_combo.findData(self.settings.preferred_browser)
         self.browser_combo.setCurrentIndex(max(index, 0))
         self.http_port_spin.setValue(self.settings.http_port)
@@ -884,7 +786,9 @@ class MainWindow(QMainWindow):
         self._sync_launch_sites_combo(self.settings.launch_url)
         self.launch_auto_open_check.setChecked(self.settings.auto_open_browser)
         self.auto_open_check.setChecked(self.settings.auto_open_browser)
-        self.auto_connect_on_startup_check.setChecked(self.settings.auto_connect_on_startup)
+        self.launch_on_startup_check.setChecked(self.settings.launch_on_startup)
+        self.auto_connect_settings.setVisible(self.settings.launch_on_startup)
+        self._refresh_auto_connect_list()
         self.disable_extensions_check.setChecked(self.settings.disable_browser_extensions)
         self.stop_existing_check.setChecked(self.settings.stop_existing_sing_box)
         self.minimize_to_tray_check.setChecked(self.settings.minimize_to_tray)
@@ -892,32 +796,113 @@ class MainWindow(QMainWindow):
         language_index = self.language_combo.findData(self.settings.language)
         self.language_combo.setCurrentIndex(max(language_index, 0))
         self.dns_edit.setText(self.settings.custom_dns)
+        self.http_port_spin.setToolTip(tr('Порты первоначального окна; новые окна имеют собственные параметры'))
+        self.socks_port_spin.setToolTip(self.http_port_spin.toolTip())
+        self.auto_open_check.setToolTip(tr('Значение по умолчанию для новых окон; в каждой карточке свой переключатель'))
+        self._loading_settings = False
 
     def save_settings(self) -> None:
         http_port = int(self.http_port_spin.value())
         socks_port = int(self.socks_port_spin.value())
         if http_port == socks_port:
-            socks_port = min(65535, http_port + 1)
-            self.socks_port_spin.setValue(socks_port)
-            QMessageBox.information(self, APP_NAME, 'SOCKS5 порт должен отличаться от HTTP. Значение обновлено автоматически.')
-        self.settings = AppSettings(
+            QMessageBox.warning(self, APP_NAME, tr('HTTP и SOCKS5 должны использовать разные порты.'))
+            return
+        ports_changed = (http_port, socks_port) != (self.settings.http_port, self.settings.socks_port)
+        first = self.controller.collection.windows[0] if self.controller.collection.windows else None
+        if ports_changed and first and self._view(first.id).status not in {'offline', 'error'}:
+            QMessageBox.information(self, APP_NAME, tr('Сначала отключите окно №{0}, чтобы изменить его порты.', first.number))
+            return
+        candidate = AppSettings(
             preferred_browser=str(self.browser_combo.currentData()),
             http_port=http_port,
             socks_port=socks_port,
             launch_url=self._current_launch_url(),
             launch_sites=self._launch_sites(),
             auto_open_browser=self.auto_open_check.isChecked(),
-            auto_connect_on_startup=self.auto_connect_on_startup_check.isChecked(),
+            auto_connect_on_startup=self.settings.auto_connect_on_startup,
+            launch_on_startup=self.launch_on_startup_check.isChecked(),
             disable_browser_extensions=self.disable_extensions_check.isChecked(),
             stop_existing_sing_box=self.stop_existing_check.isChecked(),
             minimize_to_tray=self.minimize_to_tray_check.isChecked(),
             auto_update_app=self.auto_update_check.isChecked(),
             language=str(self.language_combo.currentData()),
             custom_dns=self.dns_edit.text().strip(),
+            theme=self.settings.theme,
         )
-        self.store.save_settings(self.settings)
+        original_ports = (first.http_port, first.socks_port, first.fixed_ports) if first else None
+        configured = False
+        try:
+            if ports_changed and first:
+                self.controller.configure(first.id, http_port=http_port, socks_port=socks_port, fixed_ports=True)
+                configured = True
+            self.store.save_settings(candidate)
+        except Exception as exc:
+            if configured:
+                try:
+                    self.controller.configure(first.id, http_port=original_ports[0], socks_port=original_ports[1],
+                                              fixed_ports=original_ports[2])
+                except Exception:
+                    pass
+            QMessageBox.warning(self, APP_NAME, sanitize_connection_error(str(exc)))
+            return
+        self.settings = candidate
+        self.controller.settings = self.settings
         self._sync_windows_startup()
-        self.status_caption_label.setText('Настройки сохранены.')
+        self.status_caption_label.setText(tr('Настройки сохранены.'))
+
+    def _remember_theme(self, name: str) -> None:
+        previous = self.settings.theme
+        if name == previous:
+            return
+        try:
+            self.store.save_theme(name)
+        except Exception as exc:
+            self.theme_selector.set_theme(previous)
+            QMessageBox.warning(self, APP_NAME, tr('Не удалось сохранить тему.\n\n') + sanitize_connection_error(str(exc)))
+            return
+        self.settings.theme = name
+        theme_manager().apply(name)
+
+    def _remember_language(self, *_args) -> None:
+        if getattr(self, '_loading_settings', False):
+            return
+        language = self.language_combo.currentData()
+        previous = self.settings.language
+        if language not in {'ru', 'en'} or language == previous:
+            return
+        try:
+            self.store.save_language(language)
+        except Exception as exc:
+            self.language_combo.blockSignals(True)
+            self.language_combo.setCurrentIndex(self.language_combo.findData(previous))
+            self.language_combo.blockSignals(False)
+            QMessageBox.warning(self, APP_NAME, tr('Не удалось сохранить язык.\n\n') + sanitize_connection_error(str(exc)))
+            return
+        self.settings.language = language
+
+    def _on_theme_changed(self, name: str) -> None:
+        self.theme_selector.set_theme(name)
+        cursor = self.log_view.textCursor()
+        anchor, position = cursor.anchor(), cursor.position()
+        scroll = self.log_view.verticalScrollBar()
+        value, at_bottom = scroll.value(), scroll.value() == scroll.maximum()
+        self.log_view.setHtml(self._format_log_html(self._last_log_text))
+        cursor = self.log_view.textCursor()
+        limit = self.log_view.document().characterCount() - 1
+        cursor.setPosition(min(anchor, limit))
+        cursor.setPosition(min(position, limit), QTextCursor.MoveMode.KeepAnchor)
+        self.log_view.setTextCursor(cursor)
+        scroll.setValue(scroll.maximum() if at_bottom else value)
+        self._set_launch_favicon(self._current_launch_url())
+        for button in self.findChildren(LoadingButton):
+            if button._loading:
+                button._advance_loading_icon()
+        self.dark_title_applied = False
+        if self.isVisible():
+            self._apply_windows_dark_title_bar()
+            self.dark_title_applied = True
+        for widget in self.findChildren(QWidget):
+            widget.update()
 
     def _remember_launch_url(self, text: str) -> None:
         self.settings.launch_url = text.strip() or 'example.com'
@@ -946,28 +931,92 @@ class MainWindow(QMainWindow):
         if self.settings.auto_update_app and self.available_update and not self.downloaded_update_installer:
             self.download_update(self.available_update)
 
-    def _remember_auto_connect_on_startup(self, *_args) -> None:
-        self.settings.auto_connect_on_startup = self.auto_connect_on_startup_check.isChecked()
-        self.store.save_settings(self.settings)
+    def _remember_launch_on_startup(self, *_args) -> None:
+        enabled = self.launch_on_startup_check.isChecked()
+        self.auto_connect_settings.setVisible(enabled)
+        if getattr(self, '_loading_settings', False):
+            return
+        previous = self.settings.launch_on_startup
+        self.settings.launch_on_startup = enabled
+        try:
+            self.store.save_settings(self.settings)
+        except Exception as exc:
+            self.settings.launch_on_startup = previous
+            self.launch_on_startup_check.blockSignals(True)
+            self.launch_on_startup_check.setChecked(previous)
+            self.launch_on_startup_check.blockSignals(False)
+            self.auto_connect_settings.setVisible(previous)
+            QMessageBox.warning(self, APP_NAME, sanitize_connection_error(str(exc)))
+            return
         self._sync_windows_startup()
+
+    def _refresh_auto_connect_list(self) -> None:
+        if not hasattr(self, 'auto_connect_list'):
+            return
+        rows = []
+        for view in self.controller.views():
+            connection = view.connection
+            profile = self.controller.profiles.get(connection.profile_id)
+            name = tr('Системное подключение') if connection.kind == 'system' else tr('Окно №{0}', connection.number)
+            label = f'{name} · {profile.name}' if profile else tr('{0} · выберите профиль на главной', name)
+            rows.append((connection.id, label, connection.auto_connect, profile is not None))
+        signature = tuple(rows)
+        if signature == getattr(self, '_auto_connect_list_signature', None):
+            return
+        self._auto_connect_list_signature = signature
+        current = self.auto_connect_list.currentItem()
+        current_id = current.data(Qt.ItemDataRole.UserRole) if current else None
+        scroll = self.auto_connect_list.verticalScrollBar().value()
+        self.auto_connect_list.blockSignals(True)
+        existing_ids = [self.auto_connect_list.item(i).data(Qt.ItemDataRole.UserRole)
+                        for i in range(self.auto_connect_list.count())]
+        rebuild = existing_ids != [row[0] for row in rows]
+        if rebuild:
+            self.auto_connect_list.clear()
+        for index, (connection_id, label, checked, available) in enumerate(rows):
+            item = QListWidgetItem() if rebuild else self.auto_connect_list.item(index)
+            item.setText(label)
+            item.setData(Qt.ItemDataRole.UserRole, connection_id)
+            item.setToolTip(label)
+            item.setSizeHint(QSize(0, 28))
+            flags = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable
+            if available:
+                flags |= Qt.ItemFlag.ItemIsEnabled
+            item.setFlags(flags)
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            if rebuild:
+                self.auto_connect_list.addItem(item)
+            if rebuild and connection_id == current_id:
+                self.auto_connect_list.setCurrentItem(item)
+        self.auto_connect_list.setFixedHeight(28 * min(4, max(1, len(rows))) + 8)
+        self.auto_connect_list.verticalScrollBar().setValue(scroll)
+        self.auto_connect_list.blockSignals(False)
+
+    def _remember_auto_connect_selection(self, item: QListWidgetItem) -> None:
+        self._auto_connect_list_signature = None
+        self._set_connection_autostart(item.data(Qt.ItemDataRole.UserRole), item.checkState() == Qt.CheckState.Checked)
+        self._refresh_auto_connect_list()
 
     def _sync_windows_startup(self) -> None:
         try:
-            set_launch_on_startup(self.settings.auto_connect_on_startup)
+            set_launch_on_startup(self.settings.launch_on_startup)
         except Exception as exc:
-            self.status_caption_label.setText('Не удалось обновить автозагрузку Windows.')
-            QMessageBox.warning(self, APP_NAME, f'Не удалось обновить автозагрузку Windows.\n\n{exc}')
+            self.status_caption_label.setText(tr('Не удалось обновить автозагрузку Windows.'))
+            QMessageBox.warning(self, APP_NAME, tr('Не удалось обновить автозагрузку Windows.\n\n{0}', exc))
+
 
     def _connect_on_startup(self) -> None:
-        if not self.settings.auto_connect_on_startup or self.runtime_state or self.connect_thread is not None:
+        if self._closing or not self._launched_on_startup or not self.settings.launch_on_startup:
             return
-        if self.current_profile() is None:
-            self.status_caption_label.setText('Автоподключение включено, но профиль не выбран.')
-            return
-        self.connect_profile()
+        self._launched_on_startup = False
+        for view in self.controller.views():
+            if view.connection.auto_connect and view.connection.profile_id in self.controller.profiles:
+                self.start_connection(view.connection.id, automatic=True)
+
 
     def _check_updates_on_startup(self) -> None:
-        self.check_for_updates(silent=True)
+        if not self._closing:
+            self.check_for_updates(silent=True)
 
     def check_for_updates(self, silent: bool = False) -> None:
         if self.update_check_thread is not None:
@@ -975,15 +1024,12 @@ class MainWindow(QMainWindow):
         self._update_check_silent = silent
         self.update_button.setEnabled(False)
         self.update_restart_button.hide()
-        self.update_status_label.setText('Проверяем обновления на GitHub...')
-        self.update_check_thread = QThread(self)
-        self.update_check_worker = UpdateCheckWorker(self.update_manager)
-        self.update_check_worker.moveToThread(self.update_check_thread)
-        self.update_check_thread.started.connect(self.update_check_worker.run)
+        self.update_status_label.setText(tr('Проверяем обновления на GitHub...'))
+        # Keep the QThread object in the GUI thread. No worker QObject is
+        # destroyed in the background while the GUI is updating Qt widgets.
+        self.update_check_thread = self.update_check_worker = UpdateCheckWorker(self.update_manager, self)
         self.update_check_worker.checked.connect(self._on_update_checked)
         self.update_check_worker.failed.connect(self._on_update_check_failed)
-        self.update_check_worker.finished.connect(self.update_check_thread.quit)
-        self.update_check_worker.finished.connect(self.update_check_worker.deleteLater)
         self.update_check_thread.finished.connect(self._on_update_check_finished)
         self.update_check_thread.finished.connect(self.update_check_thread.deleteLater)
         self.update_check_thread.start()
@@ -994,20 +1040,20 @@ class MainWindow(QMainWindow):
         self.available_update = result.release if result.update_available else None
         self.downloaded_update_installer = None
         if result.update_available and result.release:
-            self.update_status_label.setText(f'Доступна версия {result.latest_version}. Текущая версия: {result.current_version}.')
+            self.update_status_label.setText(tr('Доступна версия {0}. Текущая версия: {1}.', result.latest_version, result.current_version))
             if self.settings.auto_update_app:
                 self.download_update(result.release)
             elif not getattr(self, '_update_check_silent', False):
-                QMessageBox.information(self, APP_NAME, f'Доступно обновление {result.latest_version}. Включите автоматическое обновление, чтобы скачать его в фоне.')
+                QMessageBox.information(self, APP_NAME, tr('Доступно обновление {0}. Включите автоматическое обновление, чтобы скачать его в фоне.', result.latest_version))
             return
-        self.update_status_label.setText(f'Установлена последняя версия {result.current_version}.')
+        self.update_status_label.setText(tr('Установлена последняя версия {0}.', result.current_version))
         if not getattr(self, '_update_check_silent', False):
-            QMessageBox.information(self, APP_NAME, 'Установлена последняя версия приложения.')
+            QMessageBox.information(self, APP_NAME, tr('Установлена последняя версия приложения.'))
 
     def _on_update_check_failed(self, message: str) -> None:
-        self.update_status_label.setText('Не удалось проверить обновления. Проверьте подключение к GitHub.')
+        self.update_status_label.setText(tr('Не удалось проверить обновления. Проверьте подключение к GitHub.'))
         if not getattr(self, '_update_check_silent', False):
-            QMessageBox.warning(self, APP_NAME, f'Не удалось проверить обновления.\n\n{message}')
+            QMessageBox.warning(self, APP_NAME, tr('Не удалось проверить обновления.\n\n{0}', message))
 
     def _on_update_check_finished(self) -> None:
         self.update_check_thread = None
@@ -1018,16 +1064,11 @@ class MainWindow(QMainWindow):
         if self.update_download_thread is not None:
             return
         self.update_button.setEnabled(False)
-        self.update_status_label.setText(f'Скачиваем обновление {release.version}...')
-        self.update_download_thread = QThread(self)
-        self.update_download_worker = UpdateDownloadWorker(self.update_manager, release)
-        self.update_download_worker.moveToThread(self.update_download_thread)
-        self.update_download_thread.started.connect(self.update_download_worker.run)
+        self.update_status_label.setText(tr('Скачиваем обновление {0}...', release.version))
+        self.update_download_thread = self.update_download_worker = UpdateDownloadWorker(self.update_manager, release, self)
         self.update_download_worker.progress.connect(self._on_update_download_progress)
         self.update_download_worker.downloaded.connect(self._on_update_downloaded)
         self.update_download_worker.failed.connect(self._on_update_download_failed)
-        self.update_download_worker.finished.connect(self.update_download_thread.quit)
-        self.update_download_worker.finished.connect(self.update_download_worker.deleteLater)
         self.update_download_thread.finished.connect(self._on_update_download_finished)
         self.update_download_thread.finished.connect(self.update_download_thread.deleteLater)
         self.update_download_thread.start()
@@ -1035,20 +1076,20 @@ class MainWindow(QMainWindow):
     def _on_update_download_progress(self, downloaded: int, total: int) -> None:
         if total > 0:
             percent = int(downloaded * 100 / total)
-            self.update_status_label.setText(f'Скачиваем обновление... {percent}%')
+            self.update_status_label.setText(tr('Скачиваем обновление... {0}%', percent))
         else:
             megabytes = downloaded / (1024 * 1024)
-            self.update_status_label.setText(f'Скачиваем обновление... {megabytes:.1f} МБ')
+            self.update_status_label.setText(tr('Скачиваем обновление... {0:.1f} МБ', megabytes))
 
     def _on_update_downloaded(self, path: object) -> None:
         self.downloaded_update_installer = path if isinstance(path, Path) else Path(str(path))
-        self.update_status_label.setText('Обновление загружено и готово к установке.')
+        self.update_status_label.setText(tr('Обновление загружено и готово к установке.'))
         self.update_restart_button.show()
 
     def _on_update_download_failed(self, message: str) -> None:
         self.downloaded_update_installer = None
-        self.update_status_label.setText('Не удалось скачать обновление.')
-        QMessageBox.warning(self, APP_NAME, f'Не удалось скачать обновление.\n\n{message}')
+        self.update_status_label.setText(tr('Не удалось скачать обновление.'))
+        QMessageBox.warning(self, APP_NAME, tr('Не удалось скачать обновление.\n\n{0}', message))
 
     def _on_update_download_finished(self) -> None:
         self.update_download_thread = None
@@ -1058,24 +1099,20 @@ class MainWindow(QMainWindow):
     def install_downloaded_update(self) -> None:
         installer = self.downloaded_update_installer
         if installer is None or not installer.exists():
-            QMessageBox.warning(self, APP_NAME, 'Файл обновления не найден. Проверьте обновления еще раз.')
+            QMessageBox.warning(self, APP_NAME, tr('Файл обновления не найден. Проверьте обновления еще раз.'))
             return
-        answer = QMessageBox.question(self, f'Обновить {APP_NAME}', 'Приложение закроется, установит обновление и запустится снова. Продолжить?')
-        if answer != QMessageBox.Yes:
+        if QMessageBox.question(self, tr('Обновить {0}', APP_NAME), tr('Приложение остановит подключения, установит обновление и запустится снова. Продолжить?')) != QMessageBox.StandardButton.Yes:
             return
-        if self.manager.is_running():
-            self.manager.stop()
-        try:
-            subprocess.Popen([str(installer), '/SILENT', '/NORESTART'], cwd=str(installer.parent), close_fds=True)
-        except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f'Не удалось запустить установщик.\n\n{exc}')
-            return
-        self.force_quit = True
-        app = QApplication.instance()
-        if app is not None:
-            app.quit()
-        else:
+        def install_after_shutdown():
+            try:
+                subprocess.Popen([str(installer), '/SILENT', '/NORESTART'], cwd=str(installer.parent), close_fds=True)
+            except Exception as exc:
+                QMessageBox.critical(self, APP_NAME, tr('Не удалось запустить установщик.\n\n{0}', exc))
+                return
+            self.force_quit = True
             self.close()
+        self._shutdown_connections(install_after_shutdown)
+
 
     def _load_profiles(self) -> None:
         current = self.current_profile()
@@ -1112,10 +1149,7 @@ class MainWindow(QMainWindow):
         accent.setFixedSize(3, 28)
         layout.addWidget(accent)
 
-        flag = QLabel(self._profile_country_code(profile) or '··')
-        flag.setObjectName('profileCountryBadge')
-        flag.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        flag.setFixedSize(28, 18)
+        flag = CountryFlagBadge(self._profile_country_code(profile))
         layout.addWidget(flag)
 
         copy = QVBoxLayout()
@@ -1127,21 +1161,11 @@ class MainWindow(QMainWindow):
         copy.addWidget(name)
         copy.addWidget(protocol)
         layout.addLayout(copy, 1)
-        menu_button = QPushButton()
+        menu_button = MenuButton()
         menu_button.setObjectName('profileMenuButton')
         menu_button.setFixedSize(24, 28)
-        dots = QPixmap(16, 16)
-        dots.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(dots)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor('#aeb4c8'))
-        for x in (3, 8, 13):
-            painter.drawEllipse(QRectF(x - 1, 7, 2, 2))
-        painter.end()
-        menu_button.setIcon(QIcon(dots))
-        menu_button.setToolTip('Изменить или удалить профиль')
-        menu_button.setAccessibleName(f'Действия с профилем {profile.name}')
+        menu_button.setToolTip(tr('Изменить или удалить профиль'))
+        menu_button.setAccessibleName(tr('Действия с профилем {0}', profile.name))
         menu_button.clicked.connect(lambda _checked=False: self._open_profile_menu(profile.id, menu_button))
         layout.addWidget(menu_button)
         return row
@@ -1183,8 +1207,8 @@ class MainWindow(QMainWindow):
 
     def _profile_menu(self, position) -> None:
         menu = QMenu(self)
-        edit_action = QAction('Изменить', menu)
-        delete_action = QAction('Удалить', menu)
+        edit_action = QAction(tr('Изменить'), menu)
+        delete_action = QAction(tr('Удалить'), menu)
         edit_action.setEnabled(self.edit_button.isEnabled())
         delete_action.setEnabled(self.delete_button.isEnabled())
         edit_action.triggered.connect(self.edit_profile)
@@ -1196,23 +1220,14 @@ class MainWindow(QMainWindow):
         finally:
             menu.deleteLater()
     def _sync_profile_buttons(self) -> None:
-        has_profile = self.current_profile() is not None
-        running = self.manager.is_running()
-        busy = self.connect_thread is not None or self.disconnect_thread is not None
+        selected = self.current_profile() is not None
+        self.edit_button.setEnabled(selected)
+        self.delete_button.setEnabled(selected)
         self._refresh_profile_item_selection()
-        self.edit_button.setEnabled(has_profile and not busy)
-        self.delete_button.setEnabled(has_profile and not busy)
-        self.connect_button.setEnabled(has_profile and (not running) and (not busy))
-        self.disconnect_button.setEnabled(running and not busy)
-        self.open_browser_button.setEnabled(bool(self.runtime_state) and running and not busy)
-        self.profile_list.setEnabled(not busy)
-        if not self.runtime_state and not busy:
-            self._update_selected_profile_details()
+        self._sync_connections_profiles()
 
-    def _update_selected_profile_details(self) -> None:
-        profile = self.current_profile()
-        self.status_profile_value.setText(profile.name if profile else '—')
-        self.protocol_label.setText(protocol_label_for_link(profile.link) if profile else '—')
+
+
 
     def current_profile(self) -> ConnectionProfile | None:
         item = self.profile_list.currentItem()
@@ -1257,266 +1272,82 @@ class MainWindow(QMainWindow):
         profile = self.current_profile()
         if not profile:
             return
-        answer = QMessageBox.question(self, 'Удалить профиль', f'Удалить профиль {profile.name}?')
-        if answer == QMessageBox.Yes:
+        uses = [v for v in self.controller.views() if v.connection.profile_id == profile.id]
+        if any(v.status not in {'offline', 'error'} or self.controller.entries[v.connection.id].manager is not None for v in uses):
+            QMessageBox.information(self, APP_NAME, tr('Сначала отключите подключения, использующие этот профиль.'))
+            return
+        text = tr('Удалить профиль {0}?', profile.name)
+        if uses:
+            text += tr('\nДля связанных окон потребуется выбрать новый профиль.')
+        if QMessageBox.question(self, tr('Удалить профиль'), text) == QMessageBox.StandardButton.Yes:
+            for view in uses:
+                self.controller.configure(view.connection.id, profile_id='', auto_connect=False)
             self.store.delete_profile(profile.id)
             self._load_profiles()
 
+
     def connect_profile(self) -> None:
-        if self.connect_thread is not None or self.disconnect_thread is not None:
-            return
-        profile = self.current_profile()
-        if not profile:
-            QMessageBox.information(self, APP_NAME, 'Сначала выберите профиль.')
-            return
-        self.save_settings()
-        self.connect_button.setVisible(True)
-        self.disconnect_button.setVisible(False)
-        self.connect_button.set_loading(True, 'Подключение...')
-        self.disconnect_button.setEnabled(False)
-        self.status_caption_label.setText('Запуск подключения...')
-        self.status_title_label.setText('Подключение запускается')
-        self.status_dot.setProperty('connected', 'pending')
-        self._refresh_status_dot()
-        self.connect_thread = QThread(self)
-        self.connect_worker = ConnectWorker(profile, self.settings, self.manager, self.store)
-        self.connect_worker.moveToThread(self.connect_thread)
-        self.connect_thread.started.connect(self.connect_worker.run)
-        self.connect_worker.message.connect(self._set_progress_message)
-        self.connect_worker.connected.connect(self._on_connected)
-        self.connect_worker.failed.connect(self._on_connect_failed)
-        self.connect_worker.finished.connect(self.connect_thread.quit)
-        self.connect_worker.finished.connect(self.connect_worker.deleteLater)
-        self.connect_thread.finished.connect(self._on_connect_finished)
-        self.connect_thread.finished.connect(self.connect_thread.deleteLater)
-        self.connect_thread.start()
+        self.add_connection_window()
 
-    def _set_progress_message(self, message: str) -> None:
-        self.status_caption_label.setText(sanitize_connection_error(message))
 
-    def _on_connected(self, state: object) -> None:
-        self.runtime_state = state if isinstance(state, RuntimeState) else None
-        self._set_connected(True)
-        if isinstance(state, RuntimeState):
-            self.status_caption_label.setText('')
-            self.status_profile_value.setText(state.profile_name)
-            self.http_port_label.setText(str(state.http_port))
-            self.socks_port_label.setText(str(state.socks_port))
-            self.protocol_label.setText(state.protocol_label)
-            self.latency_value.setText('...')
-            self._start_ping_updates()
-            self.setWindowTitle(f'{APP_NAME} - Подключено к {state.profile_name}')
-        self._set_tab_index(0)
-        self._load_profiles()
-        self.refresh_log()
 
-    def _on_connect_failed(self, message: str) -> None:
-        message = sanitize_connection_error(message)
-        try:
-            append_log_entry(message)
-        except Exception:
-            pass
-        self.manager.stop()
-        self._stop_ping_updates()
-        self.runtime_state = None
-        self._set_connected(False)
-        self.status_title_label.setText('Не удалось подключиться')
-        self.status_dot.setProperty('connected', 'error')
-        self._refresh_status_dot()
-        self.status_caption_label.setText('Проверьте профиль и доступность сервера, затем повторите попытку. Подробности — в журнале.')
-        error = QMessageBox(self)
-        error.setWindowTitle('Ошибка подключения')
-        error.setIcon(QMessageBox.Icon.Critical)
-        error.setTextFormat(Qt.TextFormat.PlainText)
-        error.setText('Не удалось подключить профиль.')
-        reason = '\n'.join(message.splitlines()[:2])[:350]
-        error.setInformativeText(f'{reason}\n\nПроверьте ссылку профиля и доступность сервера, затем нажмите «Подключить» ещё раз.')
-        error.setDetailedText(message)
-        log_button = error.addButton('Открыть журнал', QMessageBox.ButtonRole.ActionRole)
-        error.addButton('Закрыть', QMessageBox.ButtonRole.RejectRole)
-        error.exec()
-        if error.clickedButton() is log_button:
-            self._set_tab_index(0)
-        error.deleteLater()
-        self.refresh_log()
 
-    def _on_connect_finished(self) -> None:
-        self.connect_button.set_loading(False)
-        self.connect_thread = None
-        self.connect_worker = None
-        self._sync_profile_buttons()
-        running = self.manager.is_running()
-        self.disconnect_button.setVisible(running)
-        self.disconnect_button.setEnabled(running)
-        self.connect_button.setVisible(not running)
 
-    def disconnect_profile(self) -> None:
-        if self.connect_thread is not None or self.disconnect_thread is not None:
-            return
-        if not self.manager.is_running():
-            self._stop_ping_updates()
-            self.runtime_state = None
-            self._set_connected(False)
-            self.status_caption_label.setText('Подключение остановлено.')
-            self.refresh_log()
-            return
-        self.disconnect_error = None
-        self.disconnect_button.setVisible(True)
-        self.disconnect_button.set_loading(True, 'Отключение...')
-        self.connect_button.setEnabled(False)
-        self.open_browser_button.setEnabled(False)
-        self.status_caption_label.setText('Останавливаем подключение...')
-        self.status_title_label.setText('Отключение proxy')
-        self.status_dot.setProperty('connected', 'pending')
-        self._refresh_status_dot()
-        self.disconnect_thread = QThread(self)
-        self.disconnect_worker = DisconnectWorker(self.manager)
-        self.disconnect_worker.moveToThread(self.disconnect_thread)
-        self.disconnect_thread.started.connect(self.disconnect_worker.run)
-        self.disconnect_worker.failed.connect(self._on_disconnect_failed)
-        self.disconnect_worker.finished.connect(self.disconnect_thread.quit)
-        self.disconnect_worker.finished.connect(self.disconnect_worker.deleteLater)
-        self.disconnect_thread.finished.connect(self._on_disconnect_finished)
-        self.disconnect_thread.finished.connect(self.disconnect_thread.deleteLater)
-        self.disconnect_thread.start()
 
-    def _on_disconnect_failed(self, message: str) -> None:
-        self.disconnect_error = message
-        try:
-            append_log_entry(message)
-        except Exception:
-            pass
 
-    def _on_disconnect_finished(self) -> None:
-        error = self.disconnect_error
-        self.disconnect_button.set_loading(False)
-        self.disconnect_thread = None
-        self.disconnect_worker = None
-        self.disconnect_error = None
-        still_running = self.manager.is_running()
-        if error and still_running:
-            self._set_connected(True)
-            self.status_caption_label.setText('Не удалось остановить подключение')
-            QMessageBox.warning(self, APP_NAME, f'Не удалось остановить подключение.\n\n{error}')
-        else:
-            self._stop_ping_updates()
-            self.runtime_state = None
-            self._set_connected(False)
-            self.status_caption_label.setText('Подключение остановлено.')
-        self.refresh_log()
-        self._sync_profile_buttons()
 
-    def open_browser(self) -> None:
-        if not self.runtime_state:
-            QMessageBox.information(self, APP_NAME, 'Сначала подключите профиль.')
-            return
-        self.save_settings()
-        open_url_with_proxy(
-            self.runtime_state.socks_port,
-            self.settings.preferred_browser,
-            self.settings.launch_url,
-            self.settings.disable_browser_extensions,
-        )
 
-    def _set_connected(self, connected: bool) -> None:
-        self.status_dot.setProperty('connected', 'true' if connected else 'false')
-        self._refresh_status_dot()
-        self.status_title_label.setText('Подключено к proxy' if connected else 'Подключение остановлено')
-        self.connect_button.setVisible(not connected)
-        self.disconnect_button.setVisible(connected)
-        busy = self.connect_thread is not None or self.disconnect_thread is not None
-        self.disconnect_button.setEnabled(connected and not busy)
-        self.open_browser_button.setEnabled(connected and not busy)
-        self.connect_button.setEnabled((not connected) and self.current_profile() is not None and not busy)
-        if not connected:
-            self.setWindowTitle(f'{APP_NAME} - Настройки')
-            self._update_selected_profile_details()
-            self.session_value.setText('00:00:00')
-            self.latency_value.setText('-')
-            self.http_port_label.setText(str(self.settings.http_port))
-            self.socks_port_label.setText(str(self.settings.socks_port))
 
-    def _refresh_status_dot(self) -> None:
-        self.status_dot.style().unpolish(self.status_dot)
-        self.status_dot.style().polish(self.status_dot)
+
+
+
+
+
+
+
+
+
+
+
 
     def _update_session_time(self) -> None:
-        if not self.runtime_state:
-            return
-        try:
-            started_at = datetime.fromisoformat(self.runtime_state.started_at)
-            if started_at.tzinfo is None:
-                started_at = started_at.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - started_at.astimezone(timezone.utc)
-            total_seconds = max(0, int(elapsed.total_seconds()))
-            hours, remainder = divmod(total_seconds, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            self.session_value.setText(f'{hours:02}:{minutes:02}:{seconds:02}')
-        except ValueError:
-            self.session_value.setText('00:00:00')
+        self.dashboard.tick()
 
-    def _start_ping_updates(self) -> None:
-        self.ping_timer.start()
-        self._request_ping_update()
 
-    def _stop_ping_updates(self) -> None:
-        self.ping_timer.stop()
-        self._finish_ping_probe()
-        self.latency_value.setText('-')
 
-    def _request_ping_update(self) -> None:
-        state = self.runtime_state
-        if state is None or not self.manager.is_running():
-            self._stop_ping_updates()
-            return
-        if self.ping_socket is not None or not state.server or state.server_port <= 0:
-            return
-        self.ping_socket = QTcpSocket(self)
-        self.ping_started_at = perf_counter()
-        self.ping_socket.connected.connect(self._on_ping_connected)
-        self.ping_socket.errorOccurred.connect(self._on_ping_failed)
-        self.ping_socket.connectToHost(state.server, state.server_port)
-        self.ping_timeout_timer.start()
 
-    def _on_ping_connected(self) -> None:
-        if self.ping_socket is None:
-            return
-        elapsed_ms = max(1, round((perf_counter() - self.ping_started_at) * 1000))
-        if self.runtime_state is not None and self.manager.is_running():
-            self.latency_value.setText(f'{elapsed_ms} мс')
-        self._finish_ping_probe()
 
-    def _on_ping_failed(self, *args) -> None:
-        if self.ping_socket is None:
-            return
-        if self.runtime_state is not None and self.manager.is_running():
-            self.latency_value.setText('нет ответа')
-        self._finish_ping_probe()
 
-    def _on_ping_timeout(self) -> None:
-        if self.ping_socket is None:
-            return
-        if self.runtime_state is not None and self.manager.is_running():
-            self.latency_value.setText('нет ответа')
-        self._finish_ping_probe()
 
-    def _finish_ping_probe(self) -> None:
-        socket = self.ping_socket
-        self.ping_socket = None
-        self.ping_timeout_timer.stop()
-        if socket is None:
-            return
-        socket.abort()
-        socket.deleteLater()
+
+
+
+
+
+
+
+
 
     def refresh_log(self) -> None:
-        text = tail_log()
+        if self._log_connection == 'system':
+            self._background('system-log', lambda: self.controller.log_text('system'), self._system_log_received)
+            return
+        text = self.controller.log_text(self._log_connection)
+        self._render_log_text(text)
+
+    def _system_log_received(self, text, error):
+        if self._log_connection == 'system':
+            self._render_log_text(error or text or '')
+
+    def _render_log_text(self, text: str) -> None:
         if text != self._last_log_text:
             self._last_log_text = text
             self.log_view.setHtml(self._format_log_html(text))
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
+
     def _format_log_html(self, text: str) -> str:
+        colors = theme_colors()
         rows = []
         for raw_line in text.splitlines():
             line = self._strip_ansi(raw_line).strip()
@@ -1527,17 +1358,17 @@ class MainWindow(QMainWindow):
             time_html = f'<span class="time">{escape(time_value)}</span>' if time_value else '<span class="time">--:--:--</span>'
             level_html = f'<span class="level {level_class}">{escape(level)}</span>' if level else '<span class="level plain">LOG</span>'
             rows.append(f'<div>{time_html}<span class="gap">  </span>{level_html}<span class="gap">  </span><span>{escape(message)}</span></div>')
-        body = ''.join(rows) or '<span class="time">Лог sing-box появится здесь после запуска.</span>'
+        body = ''.join(rows) or tr('<span class="time">Лог sing-box появится здесь после запуска.</span>')
         return f"""
         <html><head><style>
-        body {{ background: #10101e; color: #9da4b8; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; }}
+        body {{ background: {colors['input']}; color: {colors['text']}; font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12px; }}
         div {{ white-space: pre-wrap; line-height: 1.35; }}
-        .time {{ color: #64748B; }}
+        .time {{ color: {colors['muted']}; }}
         .level {{ font-weight: 700; }}
-        .info {{ color: #10B981; }}
-        .warn, .warning {{ color: #F59E0B; }}
-        .error {{ color: #EF4444; }}
-        .debug, .trace, .plain {{ color: #94A3B8; }}
+        .info {{ color: {colors['muted']}; }}
+        .warn, .warning {{ color: {colors['warning']}; }}
+        .error {{ color: {colors['error']}; }}
+        .debug, .trace, .plain {{ color: {colors['muted']}; }}
         </style></head><body>{body}</body></html>
         """
 
@@ -1574,14 +1405,8 @@ class MainWindow(QMainWindow):
 
     def _quit_from_tray(self) -> None:
         self.force_quit = True
-        if self.manager.is_running():
-            self.manager.stop()
-        if self.tray_icon:
-            self.tray_icon.hide()
-        if self.close():
-            app = QApplication.instance()
-            if app is not None:
-                QTimer.singleShot(0, app.quit)
+        self.close()
+
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1590,30 +1415,23 @@ class MainWindow(QMainWindow):
             self.dark_title_applied = True
 
     def _apply_windows_dark_title_bar(self) -> None:
-        try:
-            hwnd = int(self.winId())
-            value = ctypes.c_int(1)
-            for attribute in (20, 19):
-                result = ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
-                if result == 0:
-                    break
-        except Exception:
-            return
+        self.sync_native_theme()
 
     def closeEvent(self, event) -> None:
+        if self._close_ready:
+            if self.tray_icon:
+                self.tray_icon.hide()
+            event.accept()
+            # A window already hidden in the tray does not trigger Qt's
+            # lastWindowClosed exit. All cleanup has completed at this point.
+            QApplication.instance().quit()
+            return
         self.save_settings()
         if not self.force_quit and self.settings.minimize_to_tray and self.tray_icon:
             self.hide()
-            self.tray_icon.showMessage(APP_NAME, 'Приложение свернуто в трей.', QSystemTrayIcon.MessageIcon.Information, 1800)
             event.ignore()
             return
-        if self.manager.is_running():
-            if not self.force_quit:
-                answer = QMessageBox.question(self, f'Закрыть {APP_NAME}', 'Остановить sing-box и закрыть приложение?')
-                if answer != QMessageBox.Yes:
-                    event.ignore()
-                    return
-            self.manager.stop()
-        if self.tray_icon:
-            self.tray_icon.hide()
-        event.accept()
+        event.ignore()
+        if not self._closing:
+            self.force_quit = True
+            self._shutdown_connections(self.close)

@@ -62,6 +62,19 @@ def sing_box_sessions_path() -> Path:
     return app_data_dir() / "sing-box-sessions.json"
 
 
+def connections_path() -> Path:
+    return app_data_dir() / "connections.json"
+
+
+def session_dir(connection_id: str) -> Path:
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", connection_id):
+        raise ValueError("Invalid connection id")
+    path = app_data_dir() / "sessions" / connection_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def updates_dir() -> Path:
     path = app_data_dir() / "updates"
     path.mkdir(parents=True, exist_ok=True)

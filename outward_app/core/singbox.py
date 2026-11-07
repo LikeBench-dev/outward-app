@@ -7,6 +7,8 @@ import shutil
 import socket
 import subprocess
 import time
+import threading
+from pathlib import Path
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -122,7 +124,6 @@ def build_vless_outbound(vless: dict) -> dict:
         "server": vless["server"],
         "server_port": vless["port"],
         "uuid": vless["uuid"],
-        "network": "tcp",
         "tls": {
             "enabled": True,
             "server_name": vless["server_name"],
@@ -203,8 +204,48 @@ def build_sing_box_config(
     return config
 
 
-def write_config(config: dict) -> None:
-    config_path().write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+def write_config(config: dict, path: Path | None = None) -> None:
+    from outward_app.core.storage import atomic_write_json
+    atomic_write_json(path or config_path(), config)
+
+
+def build_session_config(connection: ParsedConnection, *, http_port: int = 0, socks_port: int = 0,
+                         custom_dns: str = "", interface: str = "", system: bool = False,
+                         local_routes: list[str] | None = None) -> dict:
+    """Generate both modes from one protocol implementation, using sing-box 1.13 fields."""
+    config = build_sing_box_config(connection, http_port or 1080, socks_port or 1081,
+                                   custom_dns or ("1.1.1.1" if system else ""))
+    config["route"]["auto_detect_interface"] = not bool(interface)
+    if interface:
+        config["route"]["default_interface"] = interface
+    # Resolve server names independently of the user traffic resolver / not-yet-running tunnel.
+    dns = config.setdefault("dns", {"servers": [], "final": "bootstrap-dns"})
+    # Typed DNS servers already use a direct dialer. Detouring to an empty direct outbound
+    # passes `check` but fails during module startup in sing-box 1.13.
+    bootstrap = {"type": "https", "tag": "bootstrap-dns", "server": "1.1.1.1"}
+    if interface:
+        bootstrap["bind_interface"] = interface
+    dns["servers"].append(bootstrap)
+    config["route"]["default_domain_resolver"] = "bootstrap-dns"
+    for server in dns["servers"]:
+        if server["tag"] != "bootstrap-dns" and server["type"] != "local":
+            server["detour"] = "proxy"
+    if system:
+        if not interface:
+            raise ValueError("Не удалось определить внешний сетевой интерфейс")
+        for server in dns["servers"]:
+            if server["tag"] != "bootstrap-dns":
+                if server["type"] == "local":
+                    raise ValueError("Для системного VPN укажите DNS-сервер вместо local")
+                server["detour"] = "proxy"
+        config["inbounds"] = [{
+            "type": "tun", "tag": "system-tun", "interface_name": "OutwardVPN",
+            "address": ["172.29.255.1/30", "fdfe:dcba:9876::1/126"],
+            "mtu": 1500, "auto_route": True, "strict_route": True, "stack": "mixed",
+            "route_exclude_address": local_routes or [],
+        }]
+        config["route"]["rules"] = [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}]
+    return config
 
 
 def append_log_entry(message: str, level: str = "ERROR") -> None:
@@ -239,7 +280,16 @@ def managed_sing_box_path() -> Path:
     return app_data_dir() / "bin" / "sing-box.exe"
 
 
+_MANAGED_BINARY_LOCK = threading.Lock()
+
+
 def _install_managed_sing_box(source: Path) -> Path:
+    # Simultaneous window starts share one runtime executable and one staging path.
+    with _MANAGED_BINARY_LOCK:
+        return _copy_managed_sing_box(source)
+
+
+def _copy_managed_sing_box(source: Path) -> Path:
     target = managed_sing_box_path()
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -310,9 +360,10 @@ def _read_sing_box_sessions() -> list[dict[str, Any]]:
 
 
 def _write_sing_box_sessions(sessions: list[dict[str, Any]]) -> None:
+    from outward_app.core.storage import atomic_write_json
     path = sing_box_sessions_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"sessions": sessions}, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, {"sessions": sessions})
 
 
 def running_sing_box_processes() -> list[dict[str, str]]:
@@ -461,10 +512,6 @@ def stop_managed_sing_box_processes() -> tuple[list[str], list[str]]:
     for session in sessions:
         if any(sing_box_session_matches_process(session, process) for process in processes):
             pids.add(str(session.get('pid')))
-    for process in processes:
-        if sing_box_process_uses_outward_config(process):
-            pids.add(str(process.get('pid')))
-
     ordered_pids = sorted(pids)
     errors = stop_pids(ordered_pids) if ordered_pids else []
     remaining_pids = wait_for_pids_to_exit(ordered_pids) if ordered_pids else []
@@ -507,25 +554,31 @@ def is_port_open(port: int) -> bool:
 
 
 def tcp_port_has_listener(port: int) -> bool:
-    script = (
-        "$items = Get-NetTCPConnection "
-        f"-LocalAddress 127.0.0.1 -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue; "
-        "if ($items) { exit 0 } else { exit 1 }"
-    )
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            cwd=str(app_data_dir()),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            startupinfo=hidden_startupinfo(),
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            check=False,
-        )
-    except OSError:
+    # Reading the native table avoids a PowerShell/WMI process for every listener poll.
+    import ctypes
+    import struct
+    from ctypes import wintypes as W
+    api = ctypes.WinDLL('iphlpapi', use_last_error=True).GetExtendedTcpTable
+    api.argtypes = [ctypes.c_void_p, ctypes.POINTER(W.DWORD), W.BOOL, W.ULONG, ctypes.c_int, W.ULONG]
+    api.restype = W.DWORD
+    size = W.DWORD()
+    result = api(None, ctypes.byref(size), False, 2, 5, 0)
+    if result not in (0, 122):
+        raise OSError(f'Не удалось прочитать TCP listeners Windows: {result}')
+    for _ in range(3):
+        buffer = ctypes.create_string_buffer(size.value)
+        result = api(buffer, ctypes.byref(size), False, 2, 5, 0)
+        if result == 122:
+            continue
+        if result:
+            raise OSError(f'Не удалось прочитать TCP listeners Windows: {result}')
+        count = struct.unpack_from('<I', buffer)[0]
+        for index in range(count):
+            state, local, local_port, remote, remote_port, pid = struct.unpack_from('<6I', buffer, 4 + index * 24)
+            if state == 2 and socket.ntohs(local_port & 0xffff) == port:
+                return True
         return False
-    return result.returncode == 0
+    return False
 
 
 def choose_socks_port(default_port: int) -> int:
@@ -553,14 +606,26 @@ def choose_proxy_ports(default_http_port: int, default_socks_port: int) -> tuple
 
 
 class SingBoxManager:
-    def __init__(self) -> None:
+    def __init__(self, config_file: Path | None = None, log_file: Path | None = None) -> None:
         self.process: subprocess.Popen | None = None
         self.ports: list[int] = []
+        self.config_file = config_file
+        self.log_file = log_file
+        self._job = None
+        self._log_thread = None
+
+    @property
+    def config(self) -> Path:
+        return self.config_file or config_path()
+
+    @property
+    def log(self) -> Path:
+        return self.log_file or log_path()
 
     def check_config(self, sing_box: str) -> None:
         result = subprocess.run(
-            [sing_box, "check", "-c", str(config_path())],
-            cwd=str(app_data_dir()),
+            [sing_box, "check", "-c", str(self.config)],
+            cwd=str(self.config.parent),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -568,6 +633,8 @@ class SingBoxManager:
             startupinfo=hidden_startupinfo(),
             creationflags=subprocess.CREATE_NO_WINDOW,
             check=False,
+            timeout=20,
+            encoding="utf-8", errors="replace",
         )
 
         if result.returncode != 0:
@@ -575,25 +642,48 @@ class SingBoxManager:
             raise RuntimeError(f"sing-box rejected config.json:\n{details}")
 
     def start(self, sing_box: str) -> subprocess.Popen:
-        log_file = log_path()
+        log_file = self.log
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        log = log_file.open("ab")
-        log.write(b"\n\n=== Outward App sing-box run ===\n")
-        log.flush()
-
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        if log_file.exists() and log_file.stat().st_size > 4 * 1024 * 1024:
+            log_file.replace(log_file.with_suffix(".log.1"))
+        # A private hidden console permits a targeted CTRL_BREAK for graceful TUN cleanup.
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NEW_CONSOLE
         self.process = subprocess.Popen(
-            [sing_box, "run", "-c", str(config_path())],
-            cwd=str(app_data_dir()),
+            [sing_box, "run", "-c", str(self.config)],
+            cwd=str(self.config.parent),
             stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             startupinfo=hidden_startupinfo(),
             creationflags=creationflags,
             close_fds=True,
         )
-        register_managed_sing_box_process(self.process, sing_box)
+        self._log_thread = threading.Thread(target=self._collect_log, args=(self.process.stdout, log_file), daemon=True)
+        self._log_thread.start()
+        if self.config_file is None:
+            register_managed_sing_box_process(self.process, sing_box)
+        else:
+            # A private process handle and a kill-on-close job provide ownership without a global kill sweep.
+            from outward_app.core.windows_process import ProcessJob
+            self._job = ProcessJob(self.process)
         return self.process
+
+    @staticmethod
+    def _collect_log(source, path: Path):
+        from outward_app.core.connections import sanitize_connection_error
+        try:
+            for raw in iter(lambda: source.readline(65536), b""):
+                text = sanitize_connection_error(raw.decode("utf-8", errors="replace"))
+                try:
+                    if path.exists() and path.stat().st_size > 4 * 1024 * 1024:
+                        path.replace(path.with_suffix(".log.1"))
+                    with path.open("a", encoding="utf-8") as destination:
+                        destination.write(text)
+                except OSError:
+                    # Always drain the pipe, even if a log is temporarily locked or the disk is full.
+                    continue
+        finally:
+            source.close()
 
     def wait_for_port(self, socks_port: int, timeout: float = 8.0) -> None:
         if not self.process:
@@ -604,13 +694,33 @@ class SingBoxManager:
         while time.time() < deadline:
             code = self.process.poll()
             if code is not None:
-                raise RuntimeError(f"sing-box exited immediately with code {code}. See {log_path()}.")
+                raise RuntimeError(self._startup_error(code))
             if tcp_port_has_listener(socks_port):
                 return
             last_error = OSError("port is not listening yet")
             time.sleep(0.3)
 
-        raise RuntimeError(f"Proxy port {socks_port} did not open. Last error: {last_error}. See {log_path()}.")
+        raise RuntimeError(f"Порт {socks_port} не открылся. Подробности — в журнале подключения.")
+
+    def _startup_error(self, code: int) -> str:
+        from outward_app.core.connections import sanitize_connection_error
+        import re
+        if self._log_thread:
+            self._log_thread.join(timeout=0.3)
+        reason = ""
+        try:
+            with self.log.open('rb') as stream:
+                stream.seek(max(0, self.log.stat().st_size - 8192))
+                lines = stream.read().decode('utf-8', errors='replace').splitlines()
+            for line in reversed(lines):
+                line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+                match = re.search(r'(?:FATAL|ERROR)(?:\[[^]]*\])?\s*(.*)', line)
+                if match:
+                    reason = sanitize_connection_error(match.group(1)).strip()[:280]
+                    break
+        except OSError:
+            pass
+        return f"Не удалось запустить подключение (код {code}). " + (reason or "Подробности — в журнале подключения.")
 
     def wait_for_ports(self, ports: list[int], timeout: float = 8.0) -> None:
         self.ports = list(ports)
@@ -618,35 +728,35 @@ class SingBoxManager:
             self.wait_for_port(port, timeout)
 
     def stop(self, ports: list[int] | None = None) -> None:
-        if not self.process:
+        process = self.process
+        if not process:
             return
-
-        pid = self.process.pid
-        if self.process.poll() is not None:
-            unregister_managed_sing_box_process(pid)
-            self.process = None
-            self.ports = []
-            return
-
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            errors = stop_pids([str(pid)])
-            remaining_pids = wait_for_pids_to_exit([str(pid)])
-            errors.extend(f'PID {remaining_pid}: process did not exit after stop request' for remaining_pid in remaining_pids)
-            if errors:
-                append_log_entry('\n'.join(errors))
-        finally:
-            ports_to_close = list(ports or self.ports)
-            if ports_to_close:
-                still_open = wait_for_ports_to_close(ports_to_close)
-                if still_open:
-                    ports_text = ', '.join(str(port) for port in still_open)
-                    append_log_entry(f'Proxy ports still listening after stop: {ports_text}', 'WARNING')
-            unregister_managed_sing_box_process(pid)
-            self.process = None
-            self.ports = []
+        if process.poll() is None:
+            from outward_app.core.windows_process import request_graceful_stop
+            if not self._job or not request_graceful_stop(process):
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if self._job:
+                    self._job.close()
+                    self._job = None
+                else:
+                    process.kill()
+                process.wait(timeout=5)
+        if self._job:
+            self._job.close()
+            self._job = None
+        if self._log_thread:
+            self._log_thread.join(timeout=2)
+            self._log_thread = None
+        if self.config_file is None:
+            unregister_managed_sing_box_process(process.pid)
+        ports_to_close = list(ports or self.ports)
+        if ports_to_close:
+            wait_for_ports_to_close(ports_to_close)
+        self.process = None
+        self.ports = []
 
     def is_running(self) -> bool:
         return bool(self.process and self.process.poll() is None)

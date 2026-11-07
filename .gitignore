@@ -9,6 +9,7 @@ env/
 build/
 dist/
 installer-output/
+/build-installer.bat
 *.spec.bak
 
 .pytest_cache/
@@ -23,6 +24,12 @@ installer-output/
 config.json
 profiles.json
 settings.json
+connections.json
+traffic.json
+system-proxy.json
+sing-box-sessions.json
+profiles.json.pre-connections.bak
+settings.json.pre-connections.bak
 chrome_proxy_profile_*/
 
 outward_app.egg-info/

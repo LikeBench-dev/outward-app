@@ -11,8 +11,8 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def startup_command() -> str:
     if getattr(sys, "frozen", False):
-        return subprocess.list2cmdline([sys.executable])
-    return subprocess.list2cmdline([sys.executable, "-m", "outward_app"])
+        return subprocess.list2cmdline([sys.executable, "--autostart"])
+    return subprocess.list2cmdline([sys.executable, "-m", "outward_app", "--autostart"])
 
 
 def set_launch_on_startup(enabled: bool) -> None:

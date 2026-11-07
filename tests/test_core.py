@@ -233,7 +233,7 @@ class CoreTests(unittest.TestCase):
                 self.assertTrue(sing_box_process_uses_outward_config(process))
                 self.assertFalse(sing_box_process_uses_outward_config({'pid': '4322', 'command_line': r'sing-box run -c C:\Users\user\own-config.json'}))
 
-    def test_stop_managed_sing_box_processes_finds_outward_config_without_session(self):
+    def test_stop_managed_sing_box_processes_does_not_kill_unrecorded_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_file = Path(tmp) / 'config.json'
             process = {
@@ -252,9 +252,9 @@ class CoreTests(unittest.TestCase):
             ):
                 stopped_pids, errors = stop_managed_sing_box_processes()
 
-            self.assertEqual(stopped_pids, ['4321'])
+            self.assertEqual(stopped_pids, [])
             self.assertEqual(errors, [])
-            stop_pids.assert_called_once_with(['4321'])
+            stop_pids.assert_not_called()
             write_sessions.assert_called_once_with([])
 
     def test_find_sing_box_installs_bundled_copy_to_app_data(self):

@@ -48,4 +48,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; Tasks: deskt
 Filename: "{app}\{#AppName}.exe"; Description: "Запустить {#AppName}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\{#AppName}.exe"; Flags: nowait skipifnotsilent
 
+[UninstallRun]
+Filename: "{app}\{#AppName}.exe"; Parameters: "--uninstall-vpn-component"; Flags: runhidden waituntilterminated; RunOnceId: "OutwardVPNComponent"
+
 
